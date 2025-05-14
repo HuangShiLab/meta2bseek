@@ -1,0 +1,8 @@
+/Users/zhangyf/Projects/Huang/Meta2bSeek/speci2bseek/target/debug/deps/libnewtype_derive-ee4b046ab5cdf260.rmeta: /Users/zhangyf/.cargo/registry/src/index.crates.io-6f17d22bba15001f/newtype_derive-0.1.6/src/lib.rs /Users/zhangyf/.cargo/registry/src/index.crates.io-6f17d22bba15001f/newtype_derive-0.1.6/src/std_unstable.rs
+
+/Users/zhangyf/Projects/Huang/Meta2bSeek/speci2bseek/target/debug/deps/libnewtype_derive-ee4b046ab5cdf260.rlib: /Users/zhangyf/.cargo/registry/src/index.crates.io-6f17d22bba15001f/newtype_derive-0.1.6/src/lib.rs /Users/zhangyf/.cargo/registry/src/index.crates.io-6f17d22bba15001f/newtype_derive-0.1.6/src/std_unstable.rs
+
+/Users/zhangyf/Projects/Huang/Meta2bSeek/speci2bseek/target/debug/deps/newtype_derive-ee4b046ab5cdf260.d: /Users/zhangyf/.cargo/registry/src/index.crates.io-6f17d22bba15001f/newtype_derive-0.1.6/src/lib.rs /Users/zhangyf/.cargo/registry/src/index.crates.io-6f17d22bba15001f/newtype_derive-0.1.6/src/std_unstable.rs
+
+/Users/zhangyf/.cargo/registry/src/index.crates.io-6f17d22bba15001f/newtype_derive-0.1.6/src/lib.rs:
+/Users/zhangyf/.cargo/registry/src/index.crates.io-6f17d22bba15001f/newtype_derive-0.1.6/src/std_unstable.rs:

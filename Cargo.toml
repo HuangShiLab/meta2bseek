@@ -1,0 +1,12 @@
+[package]
+name = "Speci2bSeek"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+flate2 = "1.0"       # Add this
+regex = "1.10"       # Add this
+anyhow = "1.0"       # Make sure you have this
+clap = { version = "4.5", features = ["derive"] }
+bio = "1.1"          # Make sure you have this
+rayon = "1.10"       # Make sure you have this
