@@ -61,5 +61,27 @@ pub enum Commands {
         threads: usize,
         #[clap(short, long)]
         output: PathBuf,
+    },
+    /// Profile metagenome sample
+    Profile {
+        #[clap(short, long)]
+        sample: PathBuf,
+        #[clap(short, long)]
+        database: PathBuf,
+        #[clap(short, long, default_value = "4")]
+        threads: usize,
+        #[clap(short, long)]
+        output: PathBuf,
+    },
+    ///  Inspect sketched .syldb and .sylsp files
+    Inspect {
+        #[clap(short, long)]
+        sample: PathBuf,
+        #[clap(short, long)]
+        database: PathBuf,
+        #[clap(short, long, default_value = "4")]
+        threads: usize,
+        #[clap(short, long)]
+        output: PathBuf,
     }
 }
