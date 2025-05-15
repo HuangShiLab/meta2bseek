@@ -8,6 +8,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod cmdline;
 mod extract_2brad;
+mod query_module;
 
 fn main() -> Result<()> {
     // 初始化日志系统
@@ -31,6 +32,20 @@ fn main() -> Result<()> {
             &format,
             compress
         )?,
+
+        cmdline::Commands::Query { 
+        sample,
+        database,
+        threads,
+        output
+        } => {
+            query_module::process_query(
+                &sample,
+                &database,
+                threads,
+                &output
+            )?
+        }
     }
 
     Ok(())
