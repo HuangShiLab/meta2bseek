@@ -1,76 +1,36 @@
-use anyhow::Result;
+// src/inspect.rs
+
+//Use this allocator when statically compiling
+//instead of the default
+//because the musl statically compiled binary
+//uses a bad default allocator which makes the
+//binary take 60% longer!!! Only affects
+//static compilation though. #[cfg(target_env = "musl")]
+
 use clap::Parser;
 
-// 仅在musl静态编译时启用jemalloc
-#[cfg(target_env = "musl")]
-#[global_allocator]
-static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
 mod cmdline;
-mod extract_2brad;
-mod query_module;
-mod profile_module;
-mod inspect_module;
+mod constants;
+mod extract;
+mod contain;
+mod inspect;
 
-fn main() -> Result<()> {
-    // 初始化日志系统
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    
-    let cli = cmdline::Cli::parse();
+use crate::cmdline::{Cli, Mode};
+use tikv_jemallocator::Jemalloc;
 
-    match cli.command {
-        cmdline::Commands::Extract { 
-            input,
-            output,
-            enzyme,
-            threads,
-            format,
-            compress,
-        } => extract_2brad::process_input(
-            &input,
-            &output,
-            &enzyme,
-            threads,
-            &format,
-            compress
-        )?,
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc; //use std::panic::set_hook;
 
-        cmdline::Commands::Query { 
-        sample,
-        database,
-        threads,
-        output
-        } => query_module::process_query(
-                &sample,
-                &database,
-                threads,
-                &output
-        )?,
-        
-        cmdline::Commands::Profile { 
-        sample,
-        database,
-        threads,
-        output
-        } => profile_module::process_profile(
-                &sample,
-                &database,
-                threads,
-                &output
-        )?,
+fn main() -> anyhow::Result<()> {
 
-        cmdline::Commands::Inspect { 
-        sample,
-        database,
-        threads,
-        output
-        } => inspect_module::process_inspect(
-                &sample,
-                &database,
-                threads,
-                &output
-        )?        
-    }
+    let cli = Cli::parse();
+
+    match cli.mode {
+        Mode::Extract(extract_args) => extract::extract(extract_args),
+        Mode::Query(contain_args) => contain::contain(contain_args, false),
+        Mode::Profile(contain_args) => contain::contain(contain_args, true),
+        Mode::Inspect(inspect_args) => inspect::inspect(inspect_args),
+    }?;
 
     Ok(())
 }
