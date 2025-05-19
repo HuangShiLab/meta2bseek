@@ -54,7 +54,7 @@ pub struct ExtractArgs {
     #[clap(num_args=1.., short='S', long="sample-names", help_heading = "INPUT", help = "Read extractes are renamed to given sample names")]
     pub sample_names: Option<Vec<String>>,
 
-    #[clap(short, long, default_value = "BcgI", help_heading = "ALGORITHM", help = "Restriction enzyme to use")]
+    #[clap(short, long, default_value = "BcgI", help_heading = "ALGORITHM", help = "Restriction enzyme to use. Available options: CspCI, AloI, BsaXI, BaeI, BcgI, CjeI, PpiI, PsrI, BplI, FalI, Bsp24I, HaeIV, CjePI, Hin4I, AlfI, BslFI")]
     pub enzyme: String,
     #[clap(short, long, help_heading = "ALGORITHM", help = "The format of the output file")]
     pub format: String,

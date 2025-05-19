@@ -11,9 +11,9 @@ use std::{
 use glob::glob;
 use crate::cmdline::ExtractArgs;
 use serde::{Serialize, Deserialize};
-use std::collections::HashSet;
+// use std::collections::HashSet;
 
-const ENZYME_DEFINITIONS: &[(&str, &[&str])] = &[
+pub const ENZYME_DEFINITIONS: &[(&str, &[&str])] = &[
     ("CspCI", &[
         r"[ACGT]{11}CAA[ACGT]{5}GTGG[ACGT]{10}",
         r"[ACGT]{10}CCAC[ACGT]{5}TTG[ACGT]{11}",
@@ -78,13 +78,13 @@ const ENZYME_DEFINITIONS: &[(&str, &[&str])] = &[
 ];
 
 #[derive(Debug)]
-struct EnzymeSpec {
-    name: String,
-    patterns: Vec<Regex>,
+pub struct EnzymeSpec {
+    pub name: String,
+    pub patterns: Vec<Regex>,
 }
 
 impl EnzymeSpec {
-    fn new(name: &str) -> Result<Self> {
+    pub fn new(name: &str) -> Result<Self> {
         let def = ENZYME_DEFINITIONS
             .iter()
             .find(|(e, _)| *e == name)
@@ -103,17 +103,17 @@ impl EnzymeSpec {
 }
 
 #[derive(Serialize, Deserialize)]
-struct SyldbEntry {
-    sequence_id: String,
-    tags: Vec<String>,
-    positions: Vec<usize>,
+pub struct SyldbEntry {
+    pub sequence_id: String,
+    pub tags: Vec<String>,
+    pub positions: Vec<usize>,
 }
 
 #[derive(Serialize, Deserialize)]
-struct SylspEntry {
-    sequence_id: String,
-    tag: String,
-    quality: Option<String>,
+pub struct SylspEntry {
+    pub sequence_id: String,
+    pub tag: String,
+    pub quality: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -346,6 +346,7 @@ fn process_fastq(
     Ok(())
 }
 
+/*
 fn extract_and_validate_tags(seq: &[u8], enzyme: &EnzymeSpec) -> Result<Vec<Vec<u8>>> {
     let seq_str = String::from_utf8_lossy(seq);
     let mut tags = Vec::new();
@@ -361,8 +362,8 @@ fn extract_and_validate_tags(seq: &[u8], enzyme: &EnzymeSpec) -> Result<Vec<Vec<
 
     Ok(tags)
 }
+*/
 
-/*
 fn extract_and_validate_tags(seq: &[u8], enzyme: &EnzymeSpec) -> Result<Vec<Vec<u8>>> {
     let seq_str = String::from_utf8_lossy(seq);
     let mut tags = Vec::new();
@@ -370,13 +371,13 @@ fn extract_and_validate_tags(seq: &[u8], enzyme: &EnzymeSpec) -> Result<Vec<Vec<
     for pattern in &enzyme.patterns {
         for m in pattern.find_iter(&seq_str) {
             let matched = m.as_str().as_bytes().to_vec();
-                tags.push(matched);
+            tags.push(matched);
         }
     }
 
     Ok(tags)
 }
-*/
+
 
 fn write_tags(
     writer: &mut dyn Write,
@@ -595,5 +596,52 @@ fn process_fastq_to_sylsp(
 
     log_stats(stats, enzyme);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bcgi_pattern_comparison() {
+        let enzyme = EnzymeSpec::new("BcgI").unwrap();
+        let test_seq = b"CCCGGATGGTAGCGTCAACGTACGTCGCTTCGGCGGCATGAAAATCGAGCGCACCTGGTTCGCCGCCGATAAGACCGGCT";
+        
+        // Test captures_iter version
+        let mut tags1 = Vec::new();
+        let seq_str = String::from_utf8_lossy(test_seq);
+        for pattern in &enzyme.patterns {
+            for captures in pattern.captures_iter(&seq_str) {
+                if let Some(m) = captures.get(0) {
+                    tags1.push(m.as_str().as_bytes().to_vec());
+                }
+            }
+        }
+        
+        // Test find_iter version
+        let mut tags2 = Vec::new();
+        for pattern in &enzyme.patterns {
+            for m in pattern.find_iter(&seq_str) {
+                tags2.push(m.as_str().as_bytes().to_vec());
+            }
+        }
+        
+        println!("Number of tags found by captures_iter: {}", tags1.len());
+        println!("Number of tags found by find_iter: {}", tags2.len());
+        
+        // Print the actual tags found
+        println!("\nTags found by captures_iter:");
+        for (i, tag) in tags1.iter().enumerate() {
+            println!("Tag {}: {}", i + 1, String::from_utf8_lossy(tag));
+        }
+        
+        println!("\nTags found by find_iter:");
+        for (i, tag) in tags2.iter().enumerate() {
+            println!("Tag {}: {}", i + 1, String::from_utf8_lossy(tag));
+        }
+        
+        // Assert that both methods find the same number of tags
+        assert_eq!(tags1.len(), tags2.len());
+    }
 }
 
