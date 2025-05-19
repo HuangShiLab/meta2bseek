@@ -2,6 +2,7 @@ use crate::cmdline::ContainArgs;
 use anyhow::Result;
 
 // 定义 ANI 计算结果的结构体
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct AniResult {
     pub adjusted_ani: f64,        // 调整后的 ANI 值
@@ -15,6 +16,7 @@ pub struct AniResult {
 }
 
 impl AniResult {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             adjusted_ani: 0.0,
@@ -30,10 +32,11 @@ impl AniResult {
 }
 
 // 计算 ANI 的主要函数
+#[allow(dead_code)]
 pub fn calculate_ani(
     shared_tags: usize,     // 共享的 2bRAD 标签数量
     query_tags: usize,      // 查询序列的标签总数
-    ref_tags: usize,        // 参考序列的标签总数
+    _ref_tags: usize,        // 参考序列的标签总数
     coverage: f64,          // 覆盖度
     theoretical_tags: usize, // 理论标签数
 ) -> AniResult {
@@ -74,6 +77,7 @@ pub fn calculate_ani(
 }
 
 // 根据覆盖度和 G 分数调整 ANI 值
+#[allow(dead_code)]
 fn adjust_ani_for_coverage_and_gscore(naive_ani: f64, coverage: f64, g_score: f64) -> f64 {
     // 当覆盖度较低时，ANI 值会被低估
     // 使用经验公式进行调整，同时考虑 G 分数的影响
@@ -84,6 +88,7 @@ fn adjust_ani_for_coverage_and_gscore(naive_ani: f64, coverage: f64, g_score: f6
 }
 
 // 计算 ANI 的置信区间
+#[allow(dead_code)]
 fn calculate_ani_confidence(ani: f64, coverage: f64, g_score: f64) -> (f64, f64) {
     // 基于覆盖度和 G 分数计算置信区间
     // 覆盖度越低，G 分数越低，置信区间越宽

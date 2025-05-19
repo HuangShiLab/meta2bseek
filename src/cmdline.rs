@@ -56,6 +56,8 @@ pub struct ExtractArgs {
 
     #[clap(short, long, default_value = "BcgI", help_heading = "ALGORITHM", help = "Restriction enzyme to use")]
     pub enzyme: String,
+    #[clap(short, long, help_heading = "ALGORITHM", help = "The format of the output file")]
+    pub format: String,
     #[clap(short, default_value_t = 200, help_heading = "ALGORITHM", help = "Subsampling rate")]
     pub c: usize,
     #[clap(short, default_value_t = 3, help = "Number of threads")]
