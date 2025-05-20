@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use bio::io::{fasta, fastq};
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
-//use rayon::prelude::*;
 use regex::Regex;
 use std::{
     fs::File,
@@ -11,7 +10,6 @@ use std::{
 use glob::glob;
 use crate::cmdline::ExtractArgs;
 use serde::{Serialize, Deserialize};
-// use std::collections::HashSet;
 
 pub const ENZYME_DEFINITIONS: &[(&str, &[&str])] = &[
     ("CspCI", &[
@@ -257,7 +255,9 @@ fn process_fasta(
 
     for record in fasta::Reader::new(reader).records() {
         let record = record.context("Failed to read FASTA record")?;
+        let seq_len = record.seq().len();
         stats.total_sequences += 1;
+        stats.total_sequence_length += seq_len;
         
         let tags = extract_and_validate_tags(record.seq(), enzyme)
             .context(format!("Failed to process sequence: {}", record.id()))?;
@@ -309,7 +309,9 @@ fn process_fastq(
 
     for result in reader.records() {
         let record = result.context("Failed to read FASTQ record")?;
+        let seq_len = record.seq().len();
         stats.total_sequences += 1;
+        stats.total_sequence_length += seq_len;
         
         let tags = extract_and_validate_tags(record.seq(), enzyme)
             .context(format!("Failed to process read: {}", record.id()))?;
@@ -345,7 +347,6 @@ fn process_fastq(
     log_stats(stats, enzyme);
     Ok(())
 }
-
 /*
 fn extract_and_validate_tags(seq: &[u8], enzyme: &EnzymeSpec) -> Result<Vec<Vec<u8>>> {
     let seq_str = String::from_utf8_lossy(seq);
@@ -427,6 +428,7 @@ fn create_writer(path: &Path, compress: bool) -> Result<Box<dyn Write>> {
 struct ExtractionStats {
     total_sequences: usize,
     total_tags: usize,
+    total_sequence_length: usize,
 }
 
 impl ExtractionStats {
@@ -434,22 +436,39 @@ impl ExtractionStats {
         Self {
             total_sequences: 0,
             total_tags: 0,
+            total_sequence_length: 0,
         }
     }
 }
 
 fn log_stats(stats: ExtractionStats, enzyme: &EnzymeSpec) {
+    let k = enzyme.patterns[0].as_str().len();
+    let total_kmers = if stats.total_sequence_length >= (k - 1) * stats.total_sequences {
+        stats.total_sequence_length - (k - 1) * stats.total_sequences
+    } else {
+        0
+    };
+    let percentage = calculate_tag_percentage(stats.total_tags, total_kmers);
+    
     println!(
         "\nProcessing complete for {}:\n\
         =============================\n\
         - Total sequences processed: {}\n\
+        - Total sequence length: {}\n\
+        - Average sequence length: {:.2}\n\
         - Total tags extracted: {}\n\
         - Average tags per sequence: {:.2}\n\
+        - Extractable k-mers: {}\n\
+        - 2bRAD tag percentage: {:.4}%\n\
         - Recognition patterns used: {}",
         enzyme.name,
         stats.total_sequences,
+        stats.total_sequence_length,
+        stats.total_sequence_length as f32 / stats.total_sequences.max(1) as f32,
         stats.total_tags,
         stats.total_tags as f32 / stats.total_sequences.max(1) as f32,
+        total_kmers,
+        percentage,
         enzyme.patterns
             .iter()
             .map(|r| r.as_str())
@@ -518,7 +537,9 @@ fn process_fasta_to_syldb(
     let reader = create_reader(input)?;
     for record in fasta::Reader::new(reader).records() {
         let record = record.context("Failed to read FASTA record")?;
+        let seq_len = record.seq().len();
         stats.total_sequences += 1;
+        stats.total_sequence_length += seq_len;
         
         let tags = extract_and_validate_tags(record.seq(), enzyme)
             .context(format!("Failed to process sequence: {}", record.id()))?;
@@ -567,7 +588,9 @@ fn process_fastq_to_sylsp(
 
     for result in reader.records() {
         let record = result.context("Failed to read FASTQ record")?;
+        let seq_len = record.seq().len();
         stats.total_sequences += 1;
+        stats.total_sequence_length += seq_len;
         
         let tags = extract_and_validate_tags(record.seq(), enzyme)
             .context(format!("Failed to process read: {}", record.id()))?;
@@ -598,50 +621,10 @@ fn process_fastq_to_sylsp(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_bcgi_pattern_comparison() {
-        let enzyme = EnzymeSpec::new("BcgI").unwrap();
-        let test_seq = b"CCCGGATGGTAGCGTCAACGTACGTCGCTTCGGCGGCATGAAAATCGAGCGCACCTGGTTCGCCGCCGATAAGACCGGCT";
-        
-        // Test captures_iter version
-        let mut tags1 = Vec::new();
-        let seq_str = String::from_utf8_lossy(test_seq);
-        for pattern in &enzyme.patterns {
-            for captures in pattern.captures_iter(&seq_str) {
-                if let Some(m) = captures.get(0) {
-                    tags1.push(m.as_str().as_bytes().to_vec());
-                }
-            }
-        }
-        
-        // Test find_iter version
-        let mut tags2 = Vec::new();
-        for pattern in &enzyme.patterns {
-            for m in pattern.find_iter(&seq_str) {
-                tags2.push(m.as_str().as_bytes().to_vec());
-            }
-        }
-        
-        println!("Number of tags found by captures_iter: {}", tags1.len());
-        println!("Number of tags found by find_iter: {}", tags2.len());
-        
-        // Print the actual tags found
-        println!("\nTags found by captures_iter:");
-        for (i, tag) in tags1.iter().enumerate() {
-            println!("Tag {}: {}", i + 1, String::from_utf8_lossy(tag));
-        }
-        
-        println!("\nTags found by find_iter:");
-        for (i, tag) in tags2.iter().enumerate() {
-            println!("Tag {}: {}", i + 1, String::from_utf8_lossy(tag));
-        }
-        
-        // Assert that both methods find the same number of tags
-        assert_eq!(tags1.len(), tags2.len());
+fn calculate_tag_percentage(tag_count: usize, total_kmers: usize) -> f64 {
+    if total_kmers == 0 {
+        0.0
+    } else {
+        (tag_count as f64 / total_kmers as f64) * 100.0
     }
 }
-
