@@ -10,6 +10,8 @@ use std::{
 use glob::glob;
 use crate::cmdline::ExtractArgs;
 use serde::{Serialize, Deserialize};
+use rayon::prelude::*;
+use std::sync::{Arc, Mutex};
 
 pub const ENZYME_DEFINITIONS: &[(&str, &[&str])] = &[
     ("CspCI", &[
@@ -75,6 +77,26 @@ pub const ENZYME_DEFINITIONS: &[(&str, &[&str])] = &[
     ]),
 ];
 
+// 定义每个内切酶的标签长度（固定匹配碱基数 + 自由匹配碱基数）
+pub const ENZYME_TAG_LENGTHS: &[(&str, usize)] = &[
+    ("CspCI", 32),  // 11 + 3 + 5 + 4 + 10 = 33
+    ("AloI", 20),   // 7 + 4 + 6 + 3 = 20
+    ("BsaXI", 23),  // 9 + 2 + 5 + 4 + 7 = 27
+    ("BaeI", 23),   // 10 + 2 + 4 + 4 + 7 = 27
+    ("BcgI", 32),   // 10 + 3 + 6 + 3 + 10 = 32
+    ("CjeI", 23),   // 8 + 3 + 6 + 2 + 9 = 28
+    ("PpiI", 22),   // 7 + 4 + 5 + 3 + 8 = 27
+    ("PsrI", 20),   // 7 + 4 + 6 + 3 + 7 = 27
+    ("BplI", 21),   // 8 + 3 + 5 + 3 + 8 = 27
+    ("FalI", 21),   // 8 + 3 + 5 + 3 + 8 = 27
+    ("Bsp24I", 21), // 8 + 3 + 6 + 3 + 7 = 27
+    ("HaeIV", 22),  // 7 + 2 + 5 + 2 + 9 = 25
+    ("CjePI", 22),  // 7 + 3 + 7 + 2 + 8 = 27
+    ("Hin4I", 21),  // 8 + 2 + 5 + 2 + 8 = 25
+    ("AlfI", 29),   // 10 + 3 + 6 + 3 + 10 = 32
+    ("BslFI", 20),  // 6 + 5 + 14 = 25
+];
+
 #[derive(Debug)]
 pub struct EnzymeSpec {
     pub name: String,
@@ -107,7 +129,7 @@ pub struct SyldbEntry {
     pub positions: Vec<usize>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct SylspEntry {
     pub sequence_id: String,
     pub tag: String,
@@ -425,6 +447,7 @@ fn create_writer(path: &Path, compress: bool) -> Result<Box<dyn Write>> {
     })
 }
 
+#[derive(Debug)]
 struct ExtractionStats {
     total_sequences: usize,
     total_tags: usize,
@@ -450,6 +473,15 @@ fn log_stats(stats: ExtractionStats, enzyme: &EnzymeSpec) {
     };
     let percentage = calculate_tag_percentage(stats.total_tags, total_kmers);
     
+    // 获取酶的标签长度
+    let tag_length = ENZYME_TAG_LENGTHS
+        .iter()
+        .find(|(name, _)| *name == enzyme.name)
+        .map(|(_, len)| *len)
+        .unwrap_or(k); // 如果找不到对应的长度，使用模式长度作为后备
+    
+    let tag_bases_percentage = (stats.total_tags * tag_length) as f64 / stats.total_sequence_length as f64 * 100.0;
+    
     println!(
         "\nProcessing complete for {}:\n\
         =============================\n\
@@ -460,6 +492,7 @@ fn log_stats(stats: ExtractionStats, enzyme: &EnzymeSpec) {
         - Average tags per sequence: {:.2}\n\
         - Extractable k-mers: {}\n\
         - 2bRAD tag percentage: {:.4}%\n\
+        - 2bRAD tag bases percentage: {:.4}%\n\
         - Recognition patterns used: {}",
         enzyme.name,
         stats.total_sequences,
@@ -469,6 +502,7 @@ fn log_stats(stats: ExtractionStats, enzyme: &EnzymeSpec) {
         stats.total_tags as f32 / stats.total_sequences.max(1) as f32,
         total_kmers,
         percentage,
+        tag_bases_percentage,
         enzyme.patterns
             .iter()
             .map(|r| r.as_str())
@@ -478,6 +512,11 @@ fn log_stats(stats: ExtractionStats, enzyme: &EnzymeSpec) {
 }
 
 pub fn extract(args: ExtractArgs) -> Result<()> {
+    // 初始化线程池
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(args.threads)
+        .build_global()?;
+
     // 创建输出目录
     std::fs::create_dir_all(&args.sample_output_dir)
         .context("Failed to create output directory")?;
@@ -583,30 +622,34 @@ fn process_fastq_to_sylsp(
     enzyme: &EnzymeSpec,
 ) -> Result<()> {
     let reader = fastq::Reader::new(create_reader(input)?);
-    let mut stats = ExtractionStats::new();
-    let mut sylsp_entries = Vec::new();
+    let records: Vec<_> = reader.records().collect::<Result<Vec<_>, _>>()?;
+    
+    let stats = Arc::new(Mutex::new(ExtractionStats::new()));
+    let sylsp_entries = Arc::new(Mutex::new(Vec::new()));
 
-    for result in reader.records() {
-        let record = result.context("Failed to read FASTQ record")?;
+    // 并行处理记录
+    records.par_iter().for_each(|record| {
         let seq_len = record.seq().len();
+        let tags = extract_and_validate_tags(record.seq(), enzyme)
+            .unwrap_or_default();
+            
+        // 更新统计信息
+        let mut stats = stats.lock().unwrap();
         stats.total_sequences += 1;
         stats.total_sequence_length += seq_len;
-        
-        let tags = extract_and_validate_tags(record.seq(), enzyme)
-            .context(format!("Failed to process read: {}", record.id()))?;
-            
         stats.total_tags += tags.len();
             
         // 为每个标签创建一个 sylsp 条目
+        let mut entries = sylsp_entries.lock().unwrap();
         for tag in &tags {
             let entry = SylspEntry {
                 sequence_id: record.id().to_string(),
                 tag: String::from_utf8_lossy(tag).to_string(),
                 quality: Some(String::from_utf8_lossy(record.qual()).to_string()),
             };
-            sylsp_entries.push(entry);
+            entries.push(entry);
         }
-    }
+    });
 
     // 生成 .sylsp 文件
     let sylsp_path = output_base.with_extension("sylsp");
@@ -614,8 +657,18 @@ fn process_fastq_to_sylsp(
         .context(format!("Failed to create sylsp file: {}", sylsp_path.display()))?;
     let sylsp_writer = BufWriter::new(sylsp_file);
     
-    bincode::serialize_into(sylsp_writer, &sylsp_entries)
+    let entries = Arc::try_unwrap(sylsp_entries)
+        .unwrap()
+        .into_inner()
+        .unwrap();
+    
+    bincode::serialize_into(sylsp_writer, &entries)
         .context("Failed to serialize sylsp data")?;
+
+    let stats = Arc::try_unwrap(stats)
+        .unwrap()
+        .into_inner()
+        .unwrap();
 
     log_stats(stats, enzyme);
     Ok(())
