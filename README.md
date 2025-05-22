@@ -9,3 +9,9 @@ Meta2bSeek is composed of tools in three categories:
 
 Strain2bFunc: A novel k-mer hashing strategy was implemented to identify both known and novel strains at a high ANI resolution, enabling to map uncharacterized strains to their closest phylogenetic neighbors in our expanded reference database.
 
+
+## Installation
+
+## How to run?
+
+## How to interpret the results?
