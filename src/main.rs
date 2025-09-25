@@ -7,30 +7,32 @@
 //binary take 60% longer!!! Only affects
 //static compilation though. #[cfg(target_env = "musl")]
 
+use anyhow::Result;
 use clap::Parser;
+use tikv_jemallocator::Jemalloc;
 
 mod cmdline;
-mod constants;
 mod extract;
+mod sketch;
 mod contain;
+mod constants;
 mod inspect;
-
-use crate::cmdline::{Cli, Mode};
-use tikv_jemallocator::Jemalloc;
+mod view;
+mod mark;
 
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc; //use std::panic::set_hook;
 
-fn main() -> anyhow::Result<()> {
-
-    let cli = Cli::parse();
+fn main() -> Result<()> {
+    let cli = cmdline::Cli::parse();
 
     match cli.mode {
-        Mode::Extract(extract_args) => extract::extract(extract_args),
-        Mode::Query(contain_args) => contain::contain(contain_args, false),
-        Mode::Profile(contain_args) => contain::contain(contain_args, true),
-        Mode::Inspect(inspect_args) => inspect::inspect(inspect_args),
-    }?;
-
-    Ok(())
+        cmdline::Mode::Extract(extract_args) => extract::extract(extract_args),
+        cmdline::Mode::Sketch(sketch_args) => sketch::sketch(sketch_args),
+        cmdline::Mode::Inspect(inspect_args) => inspect::inspect(inspect_args),
+        cmdline::Mode::View(view_args) => view::view(view_args),
+        cmdline::Mode::Query(contain_args) => contain::query(contain_args),
+        cmdline::Mode::Profile(profile_args) => contain::profile(profile_args),
+        cmdline::Mode::Mark(mark_args) => mark::mark(mark_args)
+    }
 }
