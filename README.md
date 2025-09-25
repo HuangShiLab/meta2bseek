@@ -67,6 +67,26 @@ cargo --version
 ```
 Note: Ensure you have Rust 1.70.0 or higher
 
+### Installation Methods
+
+#### Method 1: Install from Source (Recommended)
+
+Clone the repository:
+
+```bash
+git clone https://github.com/HuangShiLab/meta2bseek.git
+cd meta2bseek
+```
+
+Build in release mode:
+
+```bash
+cargo build --release
+```
+
+After compilation, the executable binary file meta2bseek will be generated in the target/release directory.
+
+
 ## How to run?
 
 ## How to interpret the results?
