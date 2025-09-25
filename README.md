@@ -84,7 +84,7 @@ Build in release mode:
 cargo build --release
 ```
 
-After compilation, the executable binary file meta2bseek will be generated in the target/release directory.
+After compilation, the executable binary file meta2bseek will be generated in the "target/release" directory.
 
 
 ## How to run?
