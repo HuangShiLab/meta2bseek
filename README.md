@@ -88,7 +88,9 @@ After compilation, the executable binary file meta2bseek will be generated in th
 
 
 ## How to run?
-Usages:
+
+### Overview of Meta2bSeek:
+
 ```
 meta2bseek -h
 
@@ -127,7 +129,48 @@ Options:
   -V, --version  Print version
 ```
 
-Extract 2bRAD tags from genome file(s) or sample file(s)
+### `extract`: Extract 2bRAD tags from genome file(s) or sample file(s)
+
+**For Reference Genomes**
+
+•	**Input**: A list of paths to reference genome FASTA files (compressed or uncompressed).
+
+•	**Example input file** (genome_list.txt):
+
+```
+/lustre1/g/aos_shihuang/databases/GTDBtk_r220/gtdb_genomes_reps_r220/database/GCA/902/513/955/GCA_902513955.1_genomic.fna.gz
+/lustre1/g/aos_shihuang/databases/GTDBtk_r220/gtdb_genomes_reps_r220/database/GCA/902/513/415/GCA_902513415.1_genomic.fna.gz
+```
+
+•	**Example Command:**
+
+```
+meta2bseek extract -t 8 -k genome_list.txt --sample-output-dir /path/to/output --out-name reference_db
+# Note: 8 is the number of threads you want to used
+```
+
+•	**Output:** A .syldb file (e.g., reference_db.syldb) in the specified output directory.
+
+**For Sample Sequences**
+
+•	**Input:** A list of paths to sample FASTQ files (compressed or uncompressed).
+
+•	**Example input file** (sample_list.txt):
+
+```
+/lustre1/g/aos_shihuang/data/BCB_12hps_monomicrobial_20241001/Enterobacteriaceae_EB/24M9200249_B_12hps.fastq.gz
+/lustre1/g/aos_shihuang/data/BCB_12hps_monomicrobial_20241001/Enterobacteriaceae_EB/24M9203369_A_12hps.fastq.gz
+```
+
+•	**Example Command:**
+
+```
+meta2bseek extract -t 8 -s sample_list.txt --sample-output-dir /path/to/output --out-name samples
+```
+
+•	**Output:** A .sylsp file (e.g., samples.sylsp) in the specified output directory.
+
+**Usages:**
 ```
 meta2bseek extract -h
 
@@ -172,7 +215,9 @@ MEMORY:
       --max-ram <MAX_RAM>  Maximum RAM usage in GB (default: 16)
 ```
 
-Inspect extracted .syldb and .sylsp files
+### `Inspect`: Inspect extracted .syldb and .sylsp files
+
+**Usage:**
 ```
 meta2bseek inspect -h
 
@@ -190,7 +235,7 @@ Options:
   -h, --help                         Print help
 ```
 
-Coverage-adjusted ANI querying between databases and samples
+### `Query`: Coverage-adjusted ANI querying between databases and samples
 ```
 meta2bseek query -h
 
@@ -240,7 +285,35 @@ extracting:
       --min-spacing <MIN_SPACING_KMER>  Minimum spacing between selected 2bRAD tags on the database genomes. Does nothing for pre-extracted files [default: 30]
 ```
 
-Species-level taxonomic profiling with abundances and ANIs
+### `profile`: Species-level taxonomic profiling with abundances and ANIs
+
+**Required Inputs**  
+•	`.sylsp` file (from sample extraction).  
+•	`.syldb` file (from reference genome extraction).  
+
+**Optional Input**  
+•	**Taxonomy File:** A TSV file with genome accessions and their corresponding taxonomy information. If not provided, results will display genome file names instead of species names.    
+•	**Example Taxonomy File Format** (taxonomy.tsv):  
+```
+accession	taxonomy
+RS_GCF_000657795.2	d__Bacteria;p__Pseudomonadota;c__Gammaproteobacteria;o__Burkholderiales;f__Burkholderiaceae;g__Bordetella;s__Bordetella pseudohinzii
+RS_GCF_001072555.1	d__Bacteria;p__Bacillota;c__Bacilli;o__Staphylococcales;f__Staphylococcaceae;g__Staphylococcus;s__Staphylococcus epidermidis
+```
+
+Example Command:
+meta2bseek profile \  
+  --sample-file samples.sylsp \  
+  --db-file reference_db.syldb \  
+  --log-path /path/to/output \  
+  --tsv-name profiling_results \  
+  --threads 8 \  
+  --taxonomy-file taxonomy.tsv  
+Output: Two TSV files will be generated in the output directory:
+1.	profiling_results.tsv: Filtered results with gscore >= 10.
+2.	pre_gscore_filter_profiling_results.tsv: Unfiltered results before applying the gscore filter.
+<img width="468" height="565" alt="image" src="https://github.com/user-attachments/assets/3b04999a-0bc8-4cfa-8572-ac1bee777775" />
+
+
 ```
 meta2bseek profile -h
 Species-level taxonomic profiling with abundances and ANIs
@@ -263,6 +336,5 @@ ALGORITHM:
       --gscore-threshold <GSCORE_THRESHOLD>
           Minimum G-score threshold for species filtering. G-score = sqrt(reads_count * tag_count). Default is 10.0 [default: 10]
 ```
-
 
 ## How to interpret the results?
