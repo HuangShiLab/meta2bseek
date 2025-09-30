@@ -215,7 +215,7 @@ MEMORY:
       --max-ram <MAX_RAM>  Maximum RAM usage in GB (default: 16)
 ```
 
-### `Inspect`: Inspect extracted .syldb and .sylsp files
+### `inspect`: Inspect extracted .syldb and .sylsp files
 
 **Usage:**
 ```
@@ -235,7 +235,7 @@ Options:
   -h, --help                         Print help
 ```
 
-### `Query`: Coverage-adjusted ANI querying between databases and samples
+### `query`: Coverage-adjusted ANI querying between databases and samples
 ```
 meta2bseek query -h
 
@@ -292,27 +292,36 @@ extracting:
 •	`.syldb` file (from reference genome extraction).  
 
 **Optional Input**  
+
 •	**Taxonomy File:** A TSV file with genome accessions and their corresponding taxonomy information. If not provided, results will display genome file names instead of species names.    
+
 •	**Example Taxonomy File Format** (taxonomy.tsv):  
+
 ```
 accession	taxonomy
 RS_GCF_000657795.2	d__Bacteria;p__Pseudomonadota;c__Gammaproteobacteria;o__Burkholderiales;f__Burkholderiaceae;g__Bordetella;s__Bordetella pseudohinzii
 RS_GCF_001072555.1	d__Bacteria;p__Bacillota;c__Bacilli;o__Staphylococcales;f__Staphylococcaceae;g__Staphylococcus;s__Staphylococcus epidermidis
 ```
 
-Example Command:
+**Example Command:**
+
+```
 meta2bseek profile \  
   --sample-file samples.sylsp \  
   --db-file reference_db.syldb \  
   --log-path /path/to/output \  
   --tsv-name profiling_results \  
   --threads 8 \  
-  --taxonomy-file taxonomy.tsv  
-Output: Two TSV files will be generated in the output directory:
-1.	profiling_results.tsv: Filtered results with gscore >= 10.
-2.	pre_gscore_filter_profiling_results.tsv: Unfiltered results before applying the gscore filter.
-<img width="468" height="565" alt="image" src="https://github.com/user-attachments/assets/3b04999a-0bc8-4cfa-8572-ac1bee777775" />
+  --taxonomy-file taxonomy.tsv
+```
 
+**Output:** Two TSV files will be generated in the output directory:
+
+1.	`profiling_results.tsv`: Filtered results with gscore >= 10.
+   
+2.	`pre_gscore_filter_profiling_results.tsv`: Unfiltered results before applying the gscore filter.
+
+**Usage:**
 
 ```
 meta2bseek profile -h
