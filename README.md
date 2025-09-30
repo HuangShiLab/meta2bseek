@@ -153,6 +153,8 @@ meta2bseek extract -t 8 -k genome_list.txt --sample-output-dir /path/to/output -
 
 **For Sample Sequences**
 
+- For single-end sequencing samples:
+
 •	**Input:** A list of paths to sample FASTQ files (compressed or uncompressed).
 
 •	**Example input file** (sample_list.txt):
@@ -166,6 +168,34 @@ meta2bseek extract -t 8 -k genome_list.txt --sample-output-dir /path/to/output -
 
 ```
 meta2bseek extract -t 8 -s sample_list.txt --sample-output-dir /path/to/output --out-name samples
+```
+
+•	**Output:** A .sylsp file (e.g., samples.sylsp) in the specified output directory.
+
+- For paired-end sequencing samples:
+
+•	**Input:** Two separate lists of paths to sample FASTQ files for the left and right reads (compressed or uncompressed).
+
+•	**Example input file**:
+
+(sample_left_list.txt)
+
+```
+/lustre1/g/aos_shihuang/Strain2b/data/MSA1002_1.clean.fq.gz
+/lustre1/g/aos_shihuang/Strain2b/data/MSA1003_1.clean.fq.gz
+```
+
+(sample_right_list.txt):
+
+```
+/lustre1/g/aos_shihuang/Strain2b/data/MSA1002_2.clean.fq.gz
+/lustre1/g/aos_shihuang/Strain2b/data/MSA1003_2.clean.fq.gz
+```
+
+•	**Example Command:**
+
+```
+meta2bseek extract -t 20 --l1 sample_left_list.txt  --l2 sample_right_list.txt --sample-output-dir /path/to/output --out-name samples)
 ```
 
 •	**Output:** A .sylsp file (e.g., samples.sylsp) in the specified output directory.
@@ -312,7 +342,9 @@ meta2bseek profile \
   --log-path /path/to/output \  
   --tsv-name profiling_results \  
   --threads 8 \  
-  --taxonomy-file taxonomy.tsv
+  --taxonomy-file taxonomy.tsv \
+  --minimum-ani 0.95 \
+  --gscore-threshold 10
 ```
 
 **Output:** Two TSV files will be generated in the output directory:
