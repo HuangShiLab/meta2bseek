@@ -16,30 +16,6 @@ use memory_stats::memory_stats;
 
 pub use crate::extract::{SyldbEntry, SylspEntry};
 
-
-// 内存监控和限制功能 - 采用 sylph 的真正实现
-// pub fn check_vram_and_block(max_ram: usize, file: &str) {
-//     if let Some(usage) = memory_stats() {
-//         let mut gb_usage_curr = usage.virtual_mem as f64 / 1_000_000_000 as f64;
-//         if (max_ram as f64) < gb_usage_curr {
-//             eprintln!("Max memory reached. Blocking processing for {}. Curr memory {:.2} GB, max mem {} GB",
-//                      file, gb_usage_curr, max_ram);
-//         }
-//         while (max_ram as f64) < gb_usage_curr {
-//             let five_second = Duration::from_secs(1);
-//             thread::sleep(five_second);
-//             if let Some(usage) = memory_stats() {
-//                 gb_usage_curr = usage.virtual_mem as f64 / 1_000_000_000 as f64;
-//                 if (max_ram as f64) >= gb_usage_curr {
-//                     eprintln!("Processing for {} freed", file);
-//                 }
-//             } else {
-//                 break;
-//             }
-//         }
-//     }
-// }
-
 // 定义分类学信息结构体
 #[derive(Debug, Clone, Default)]
 pub struct TaxonomyInfo {
@@ -85,15 +61,15 @@ impl TaxonomyInfo {
     }
 }
 
-// 物种级别的丰度结果 - 使用 Arc 共享 TaxonomyInfo
+// 物种级别的丰度结果
 #[derive(Debug, Clone)]
 pub struct SpeciesAbundanceResult {
     pub taxonomy: Arc<TaxonomyInfo>,
-    pub sample_abundances: FxHashMap<String, f64>,  // sample_id -> abundance
+    pub sample_abundances: FxHashMap<String, f64>,
     pub total_tags: usize,
-    pub genome_count: usize,  // 该物种包含的genome数量
-    pub reads_count: usize,   // 该物种的总 reads 数 (S)
-    pub gscore: f64,          // G-score = sqrt(reads_count * total_tags)
+    pub genome_count: usize,
+    pub reads_count: usize,
+    pub gscore: f64,
 }
 
 // 定义比对结果结构
@@ -122,8 +98,8 @@ pub struct QueryResult {
 #[derive(Debug, Clone)]
 pub struct GenomeProfileResult {
     pub genome_id: String,
-    pub sample_id: String,  // 这个字段将存储实际的样本来源（如 sample1, sample4 等）
-    pub file_path: String,  // 新增字段，存储文件路径
+    pub sample_id: String,
+    pub file_path: String,
     pub adjusted_ani: f64,
     pub taxonomic_abundance: f64,
     pub sequence_abundance: f64,
@@ -132,9 +108,7 @@ pub struct GenomeProfileResult {
     pub eff_cov: f64,
 }
 
-// 新增：k-mer重新分配相关的结构体和函数
-
-// Winner table条目结构 - 对应sylph中的 (f64, &'a GenomeSketch, bool)
+// Winner table条目结构
 #[derive(Debug, Clone)]
 struct WinnerTableEntry {
     pub ani: f64,
@@ -150,354 +124,7 @@ struct ReassignmentStats {
     pub reassignment_ratio: f64,
 }
 
-// 构建winner table - 借鉴sylph的高效实现
-fn build_winner_table<'a>(
-    results: &'a [QueryResult], 
-    db_entries: &'a [SyldbEntry],
-    log_reassign: bool
-) -> FxHashMap<Hash, WinnerTableEntry> {
-    eprintln!("Building winner table for {} results and {} database entries", results.len(), db_entries.len());
-    
-    let mut tag_to_genome_map: FxHashMap<Hash, WinnerTableEntry> = FxHashMap::default();
-    
-    // 关键优化1：构建sequence_id到db_entry的直接映射，避免O(G)查找
-    let mut seq_id_to_entry: FxHashMap<String, &SyldbEntry> = FxHashMap::default();
-    for entry in db_entries {
-        seq_id_to_entry.insert(entry.sequence_id.clone(), entry);
-    }
-    
-    eprintln!("Built seq_id_to_entry mapping with {} entries", seq_id_to_entry.len());
-    
-    // 关键优化2：借鉴sylph的直接遍历方式，避免复杂的嵌套查找
-    for res in results.iter() {
-        // O(1)查找，而不是O(G)的find操作
-        if let Some(db_entry) = seq_id_to_entry.get(&res.contig_name) {
-            // 减少字符串操作：预先计算genome_id
-            let genome_id = extract_genome_id_from_path(&db_entry.genome_source);
-            
-            // 借鉴sylph的简洁遍历方式
-            for tag in &db_entry.tags {
-                let entry = tag_to_genome_map.entry(*tag).or_insert_with(|| {
-                    WinnerTableEntry {
-                        ani: res.adjusted_ani,
-                        genome_id: genome_id.to_string(),
-                        was_reassigned: false,
-                    }
-                });
-                
-                // 关键：选择ANI最高的基因组作为该tag的"赢家"
-                if res.adjusted_ani > entry.ani {
-                    *entry = WinnerTableEntry {
-                        ani: res.adjusted_ani,
-                        genome_id: genome_id.to_string(),
-                        was_reassigned: true,
-                    };
-                }
-            }
-        } else {
-            eprintln!("Warning: No database entry found for contig {}", res.contig_name);
-        }
-    }
-    
-    eprintln!("Winner table built with {} unique tags", tag_to_genome_map.len());
-    
-    // 记录重新分配日志（借鉴sylph的简洁实现）
-    if log_reassign {
-        eprintln!("------------- Logging tag reassignments -----------------");
-        let mut genome_to_index: FxHashMap<String, usize> = FxHashMap::default();
-        for (i, res) in results.iter().enumerate() {
-            eprintln!("Index\t{}\t{}\t{}", i, res.genome_file, res.contig_name);
-            genome_to_index.insert(res.genome_file.clone(), i);
-        }
-        
-        // 关键优化3：借鉴sylph的简洁并行计算，避免复杂的映射查找
-        (0..results.len()).into_par_iter().for_each(|i| {
-            let res = &results[i];
-            let mut reassign_edge_map: FxHashMap<(usize, usize), usize> = FxHashMap::default();
-            
-            // 使用优化后的seq_id_to_entry映射
-            if let Some(db_entry) = seq_id_to_entry.get(&res.contig_name) {
-                for tag in &db_entry.tags {
-                    if let Some(winner_entry) = tag_to_genome_map.get(tag) {
-                        if winner_entry.genome_id != res.genome_file {
-                            if let Some(&winner_index) = genome_to_index.get(&winner_entry.genome_id) {
-                                let edge_count = reassign_edge_map.entry((winner_index, i)).or_insert(0);
-                                *edge_count += 1;
-                            }
-                        }
-                    }
-                }
-            }
-            
-            // 直接输出，避免收集到向量中
-            for ((from_idx, to_idx), count) in reassign_edge_map {
-                if count > 10 {
-                    eprintln!("{}->{}\t{}\ttags reassigned", from_idx, to_idx, count);
-                }
-            }
-        });
-    }
-    
-    // 添加调试信息：统计重新分配的情况
-    let mut reassigned_tags = 0;
-    let mut total_tags = 0;
-    for entry in tag_to_genome_map.values() {
-        total_tags += 1;
-        if entry.was_reassigned {
-            reassigned_tags += 1;
-        }
-    }
-    eprintln!("Reassignment statistics: {}/{} tags were reassigned ({:.2}%)", 
-              reassigned_tags, total_tags, 
-              if total_tags > 0 { reassigned_tags as f64 / total_tags as f64 * 100.0 } else { 0.0 });
-    
-    // 检查tags重叠情况
-    let mut tag_counts: FxHashMap<Hash, usize> = FxHashMap::default();
-    for db_entry in db_entries {
-        for tag in &db_entry.tags {
-            *tag_counts.entry(*tag).or_insert(0) += 1;
-        }
-    }
-    
-    let overlapping_tags = tag_counts.values().filter(|&&count| count > 1).count();
-    let total_unique_tags = tag_counts.len();
-    eprintln!("Tag overlap analysis: {}/{} unique tags are shared between genomes ({:.2}%)", 
-              overlapping_tags, total_unique_tags,
-              if total_unique_tags > 0 { overlapping_tags as f64 / total_unique_tags as f64 * 100.0 } else { 0.0 });
-    
-    if overlapping_tags > 0 {
-        eprintln!("Shared tags found! This should enable reassignment.");
-    } else {
-        eprintln!("No shared tags found. Reassignment cannot work without overlapping tags.");
-    }
-    
-    tag_to_genome_map
-}
-
-// 使用winner table重新计算统计结果 - 模仿sylph的get_stats函数
-fn recalculate_with_winner_table(
-    db_entries: &[SyldbEntry],
-    sample_entries: &[SylspEntry],
-    winner_map: &FxHashMap<Hash, WinnerTableEntry>,
-    min_ani: f64,
-    log_reassign: bool
-) -> Vec<QueryResult> {
-    eprintln!("Recalculating with winner table for {} database entries and {} sample entries", 
-              db_entries.len(), sample_entries.len());
-    
-    // 按样本源分组样本条目
-    let mut sample_groups: FxHashMap<String, Vec<&SylspEntry>> = FxHashMap::default();
-    for entry in sample_entries {
-        sample_groups.entry(entry.sample_source.clone())
-            .or_default()
-            .push(entry);
-    }
-    
-    let mut all_results = Vec::new();
-    
-    // 为每个样本源分别计算
-    for (sample_source, group_entries) in sample_groups {
-        let sample_tags: HashSet<Hash> = group_entries.iter()
-            .map(|entry| entry.tag.clone())
-            .collect();
-        
-        let total_sample_tags = group_entries.len();
-        
-        // 为每个数据库条目计算重新分配后的结果
-        for db_entry in db_entries {
-            // 最小标签数过滤
-            if db_entry.tags.len() < MIN_TAGS_FOR_GENOME {
-                continue;
-            }
-            
-            let mut owned_tags = 0;
-            let mut tags_lost_count = 0;
-            
-            // 计算属于该基因组的tags（模仿sylph的重新分配逻辑）
-            for tag in &db_entry.tags {
-                if sample_tags.contains(tag) {
-                    if let Some(winner_entry) = winner_map.get(tag) {
-                        if winner_entry.genome_id == extract_genome_id_from_path(&db_entry.genome_source) {
-                            // 该tag属于当前基因组
-                            owned_tags += 1;
-                        } else {
-                            // 该tag被重新分配给其他基因组
-                            tags_lost_count += 1;
-                        }
-                    } else {
-                        // 该tag没有被任何基因组"拥有"（理论上不应该发生）
-                        owned_tags += 1;
-                    }
-                }
-            }
-            
-            let total_ref_tags = db_entry.tags.len();
-            
-            if log_reassign && tags_lost_count > 0 {
-                eprintln!("Genome {} in sample {}: owned_tags={}, lost_tags={}, total_ref_tags={}", 
-                         extract_genome_id_from_path(&db_entry.genome_source), 
-                         sample_source, owned_tags, tags_lost_count, total_ref_tags);
-            }
-            
-            // 计算统计数据
-            let mut result = calculate_statistics(
-                owned_tags,
-                total_sample_tags,
-                total_ref_tags,
-            );
-            
-            // 设置基本信息 - 关键修复：使用正确的样本源
-            result.sample_file = sample_source.clone();
-            result.genome_file = extract_genome_id_from_path(&db_entry.genome_source).to_string();
-            result.contig_name = db_entry.sequence_id.clone();
-            result.shared_tags = owned_tags;
-            result.query_tags = total_sample_tags;
-            result.ref_tags = total_ref_tags;
-            
-            // 计算平均深度和覆盖度
-            if owned_tags > 0 {
-                result.mean_cov_geq1 = 1.0;
-                result.eff_cov = owned_tags as f64 / total_ref_tags as f64;
-                result.median_cov = 1.0;
-            }
-            
-            // 应用profile专用的过滤条件
-            if filter_results_for_profile(&result, Some(min_ani)) {
-                all_results.push(result);
-            }
-        }
-    }
-    
-    eprintln!("Recalculation completed: {} results after filtering", all_results.len());
-    all_results
-}
-
-// 过滤过度重新分配的基因组 - 完全模仿sylph的derep_if_reassign_threshold函数
-fn filter_over_reassigned_genomes(
-    results_old: &[QueryResult],
-    results_new: &[QueryResult],
-    ani_thresh: f64,
-    k: f64
-) -> Vec<QueryResult> {
-    eprintln!("Filtering over-reassigned genomes: old_results={}, new_results={}, ani_thresh={}, k={}", 
-              results_old.len(), results_new.len(), ani_thresh, k);
-    
-    let ani_thresh = ani_thresh / 100.0;
-    
-    // 构建genome_id到旧结果的映射
-    let mut genome_to_old_result: FxHashMap<String, &QueryResult> = FxHashMap::default();
-    for result in results_old.iter() {
-        genome_to_old_result.insert(result.genome_file.clone(), result);
-    }
-    
-    let threshold = f64::powf(ani_thresh, k);
-    let mut return_vec = Vec::new();
-    let mut filtered_count = 0;
-    
-    for result in results_new.iter() {
-        if let Some(old_res) = genome_to_old_result.get(&result.genome_file) {
-            let num_tag_reassign = (old_res.shared_tags - result.shared_tags) as f64;
-            let reass_thresh = threshold * result.ref_tags as f64;
-            
-            if num_tag_reassign < reass_thresh {
-                return_vec.push(result.clone());
-            } else {
-                eprintln!("genome {} had num tags reassigned = {}, threshold was {}, removing.", 
-                         result.genome_file, num_tag_reassign, reass_thresh);
-                filtered_count += 1;
-            }
-        } else {
-            // 如果没有找到旧结果，保留新结果
-            return_vec.push(result.clone());
-        }
-    }
-    
-    eprintln!("Filtering completed: {} genomes filtered out, {} genomes retained", 
-              filtered_count, return_vec.len());
-    
-    return_vec
-}
-
-// 计算 G-score 的函数
-// 输入：某个物种的 reads 数 S（所有 2bRAD markers 的总 reads）和测得的 tag 数目 t
-// 输出：G-score = sqrt(S * t)
-fn calculate_gscore(reads_count: usize, tag_count: usize) -> f64 {
-    ((reads_count as f64) * (tag_count as f64)).sqrt()
-}
-
-// 基于 G-score 过滤的函数
-// 输入：物种列表（包含 S 和 t 信息）以及一个外部指定的阈值 gscore_threshold
-// 输出：过滤后的物种列表，只保留 G-score >= gscore_threshold 的物种
-fn filter_species_by_gscore(
-    species_results: &mut Vec<SpeciesAbundanceResult>,
-    gscore_threshold: f64
-) -> Vec<SpeciesAbundanceResult> {
-    eprintln!("Filtering species by G-score threshold: {:.2}", gscore_threshold);
-    
-    let initial_count = species_results.len();
-    
-    // 首先计算每个物种的 G-score
-    for species in species_results.iter_mut() {
-        species.gscore = calculate_gscore(species.reads_count, species.total_tags);
-    }
-    
-    // 过滤 G-score >= gscore_threshold 的物种
-    let filtered_results: Vec<SpeciesAbundanceResult> = species_results
-        .iter()
-        .filter(|species| species.gscore >= gscore_threshold)
-        .cloned()
-        .collect();
-    
-    let filtered_count = filtered_results.len();
-    let removed_count = initial_count - filtered_count;
-    
-    eprintln!("G-score filtering results: {} species retained, {} species removed (threshold: {:.2})", 
-              filtered_count, removed_count, gscore_threshold);
-    
-    if removed_count > 0 {
-        eprintln!("Removed species had G-scores below {:.2}", gscore_threshold);
-    }
-    
-    filtered_results
-}
-
-// 重新计算丰度 - 模仿sylph的丰度计算逻辑
-fn recalculate_abundances_after_reassignment(
-    results: &mut [QueryResult],
-    sample_entries: &[SylspEntry]
-) {
-    eprintln!("Recalculating abundances for {} results", results.len());
-    
-    // 计算总覆盖度
-    let total_cov: f64 = results.iter()
-        .map(|r| r.eff_cov)
-        .sum();
-    
-    let total_seq_cov: f64 = results.iter()
-        .map(|r| r.eff_cov * r.ref_tags as f64)
-        .sum();
-    
-    eprintln!("Total coverage: {:.6}, Total sequence coverage: {:.6}", total_cov, total_seq_cov);
-    
-    // 重新计算每个结果的丰度
-    for result in results.iter_mut() {
-        if total_cov > 0.0 {
-            result.taxonomic_abundance = result.eff_cov / total_cov * 100.0;
-        } else {
-            result.taxonomic_abundance = 0.0;
-        }
-        
-        if total_seq_cov > 0.0 {
-            result.sequence_abundance = result.eff_cov * result.ref_tags as f64 / total_seq_cov * 100.0;
-        } else {
-            result.sequence_abundance = 0.0;
-        }
-    }
-    
-    eprintln!("Abundance recalculation completed");
-}
-
-// 修改常量
+// ==================== 修复的常量定义 ====================
 // FIX: 收紧阈值以降低假阳性
 const MIN_COVERAGE: f64 = 0.01;           // 0.001 -> 0.01 (1%)
 const MIN_ANI: f64 = 95.0;                // 90 -> 95
@@ -518,6 +145,314 @@ impl MultiWriter {
     }
     fn add_writer(&mut self, writer: Box<dyn Write + Send>) {
         self.writers.push(writer);
+    }
+}
+
+impl Write for MultiWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        for w in &mut self.writers {
+            w.write_all(buf)?;
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        for w in &mut self.writers {
+            w.flush()?;
+        }
+        Ok(())
+    }
+}
+
+pub fn query(args: ContainArgs) -> Result<()> {
+    let db_files: Vec<_> = args.files.iter()
+        .filter(|f| f.ends_with(".syldb"))
+        .collect();
+    
+    let sample_files: Vec<_> = args.files.iter()
+        .filter(|f| f.ends_with(".sylsp"))
+        .collect();
+
+    if db_files.is_empty() {
+        return Err(anyhow!("No .syldb files found in input files"));
+    }
+
+    if sample_files.is_empty() {
+        return Err(anyhow!("No .sylsp files found in input files"));
+    }
+
+    let writer = Arc::new(Mutex::new(create_multi_writer(&args.out_file_name)?));
+    print_header(&writer)?;
+
+    for db_path in db_files {
+        eprintln!("Processing database file: {}", db_path);
+        
+        let db_file = File::open(db_path)
+            .with_context(|| format!("Failed to open database file: {}", db_path))?;
+        let db_reader = BufReader::new(db_file);
+        let db_entries: Vec<SyldbEntry> = bincode::deserialize_from(db_reader)
+            .with_context(|| format!("Failed to deserialize database file: {}", db_path))?;
+
+        eprintln!("Found {} entries in database", db_entries.len());
+
+        sample_files.par_iter().try_for_each(|sample_path| -> Result<()> {
+            eprintln!("Processing sample file: {}", sample_path);
+            
+            let sample_file = File::open(sample_path)
+                .with_context(|| format!("Failed to open sample file: {}", sample_path))?;
+            let sample_reader = BufReader::new(sample_file);
+            let sample_entries: Vec<SylspEntry> = bincode::deserialize_from(sample_reader)
+                .with_context(|| format!("Failed to deserialize sample file: {}", sample_path))?;
+
+            eprintln!("Found {} entries in sample", sample_entries.len());
+
+            if sample_entries.is_empty() {
+                eprintln!("Warning: Sample {} has no tags", sample_path);
+                return Ok(());
+            }
+
+            let sample_tags: HashMap<Hash, usize> = sample_entries.iter()
+                .map(|entry| (entry.tag.clone(), 1))
+                .collect();
+
+            let total_sample_tags = sample_entries.len();
+            eprintln!("Total unique tags in sample: {}", total_sample_tags);
+
+            for db_entry in &db_entries {
+                let mut shared_tags = 0;
+                let mut coverages = Vec::new();
+                let total_ref_tags = db_entry.tags.len();
+
+                for tag in &db_entry.tags {
+                    if sample_tags.contains_key(tag) {
+                        shared_tags += 1;
+                        coverages.push(1.0);
+                    }
+                }
+
+                eprintln!("Found {} shared tags between sample and reference {}", 
+                         shared_tags, db_entry.sequence_id);
+
+                let mut result = calculate_statistics(
+                    shared_tags,
+                    total_sample_tags,
+                    total_ref_tags,
+                );
+
+                result.sample_file = sample_path.to_string();
+                result.genome_file = db_path.to_string();
+                result.contig_name = db_entry.sequence_id.clone();
+                result.shared_tags = shared_tags;
+                result.query_tags = total_sample_tags;
+                result.ref_tags = total_ref_tags;
+
+                if shared_tags > 0 {
+                    result.mean_cov_geq1 = 1.0;
+                    result.eff_cov = shared_tags as f64 / total_ref_tags as f64;
+                    
+                    if !coverages.is_empty() {
+                        coverages.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                        result.median_cov = if coverages.len() % 2 == 0 {
+                            (coverages[coverages.len()/2 - 1] + coverages[coverages.len()/2]) / 2.0
+                        } else {
+                            coverages[coverages.len()/2]
+                        };
+                    }
+                }
+
+                // FIX: 使用修复后的过滤函数
+                if filter_results(&result, args.minimum_ani) {
+                    eprintln!("Result passed filters: ANI={:.2}, Coverage={:.3}", 
+                            result.adjusted_ani, result.eff_cov);
+                    print_result(&result, &writer)?;
+                } else {
+                    eprintln!("Result filtered out: ANI={:.2}, Coverage={:.3}", 
+                            result.adjusted_ani, result.eff_cov);
+                }
+            }
+            Ok(())
+        })?;
+    }
+
+    Ok(())
+}
+
+fn create_multi_writer(out_file_name: &Option<String>) -> Result<Box<dyn Write + Send>> {
+    let mut mw = MultiWriter::new();
+    mw.add_writer(Box::new(BufWriter::new(std::io::stdout())));
+    if let Some(path) = out_file_name {
+        let file = File::create(path)
+            .with_context(|| format!("Failed to create output file: {}", path))?;
+        mw.add_writer(Box::new(BufWriter::new(file)));
+    }
+    Ok(Box::new(mw))
+}
+
+fn print_header(writer: &Arc<Mutex<Box<dyn Write + Send>>>) -> Result<()> {
+    let mut writer = writer.lock().unwrap();
+    writeln!(writer, "{:<20} {:<20} {:<10} {:<10} {:<15} {:<15} {:<10} {:<10} {:<10} {:<15} {:<10} {:<10}",
+        "Sample_file", "Genome_file", "ANI(%)", "Eff_cov", "ANI_5-95%", "Eff_lambda", "Lambda_5-95%", "Median_cov", "Mean_cov", "Containment", "Naive_ANI", "Contig_name")?;
+    writeln!(writer, "{:-<150}", "")?;
+    Ok(())
+}
+
+fn print_result(result: &QueryResult, writer: &Arc<Mutex<Box<dyn Write + Send>>>) -> Result<()> {
+    let mut writer = writer.lock().unwrap();
+    writeln!(writer, "{:<20} {:<20} {:<10.2} {:<10.3} {:<7.2}-{:<7.2} {:<10.3} {:<7.2}-{:<7.2} {:<10.3} {:<10.3} {:<7} {:<10.2} {:<10}",
+        result.sample_file,
+        result.genome_file,
+        result.adjusted_ani,
+        result.eff_cov,
+        result.ani_percentile.0,
+        result.ani_percentile.1,
+        result.eff_lambda,
+        result.lambda_percentile.0,
+        result.lambda_percentile.1,
+        result.median_cov,
+        result.mean_cov_geq1,
+        result.containment_ind,
+        result.naive_ani,
+        result.contig_name
+    )?;
+    Ok(())
+}
+
+// ==================== 修复的统计计算函数 ====================
+// FIX: 删除 coverage_factor 调整，使用纯 containment ANI
+fn calculate_statistics(shared_tags: usize, query_tags: usize, total_ref_tags: usize) -> QueryResult {
+    if query_tags == 0 || total_ref_tags == 0 {
+        return QueryResult {
+            sample_file: String::new(),
+            genome_file: String::new(),
+            contig_name: String::new(),
+            adjusted_ani: 0.0,
+            eff_cov: 0.0,
+            ani_percentile: (0.0, 0.0),
+            eff_lambda: 0.0,
+            lambda_percentile: (0.0, 0.0),
+            median_cov: 0.0,
+            mean_cov_geq1: 0.0,
+            containment_ind: format!("{}/{}", shared_tags, total_ref_tags),
+            naive_ani: 0.0,
+            ref_tags: total_ref_tags,
+            shared_tags: 0,
+            query_tags: 0,
+            taxonomic_abundance: 0.0,
+            sequence_abundance: 0.0,
+        };
+    }
+
+    let shared_tags_f64 = shared_tags as f64;
+    let total_ref_tags_f64 = total_ref_tags as f64;
+    let containment_ratio = shared_tags_f64 / total_ref_tags_f64;
+    
+    // FIX: 只有当共享标签数大于最小要求时才计算 ANI
+    let (naive_ani, adjusted_ani) = if shared_tags >= MIN_SHARED_TAGS {
+        let naive = f64::powf(containment_ratio, 1.0 / K) * 100.0;
+        // FIX: 删除 coverage_factor 调整，使用纯 containment ANI
+        (naive, naive)
+    } else {
+        // FIX: 共享标签不足时，ANI 应该接近 0 而不是 80%
+        let base_ani = (shared_tags_f64 / MIN_SHARED_TAGS as f64) * 30.0;
+        (base_ani, base_ani)
+    };
+    
+    let eff_cov = containment_ratio;
+    
+    let eff_lambda = if eff_cov < LAMBDA_THRESHOLD {
+        eff_cov * 1.2
+    } else {
+        eff_cov
+    };
+
+    // 计算置信区间
+    let base_uncertainty = 1.0;
+    let coverage_uncertainty = (1.0 - eff_cov) * 1.5;
+    let total_uncertainty = base_uncertainty + coverage_uncertainty;
+    
+    let ani_low = (adjusted_ani - total_uncertainty).max(0.0);
+    let ani_high = (adjusted_ani + total_uncertainty).min(100.0);
+    
+    let lambda_uncertainty = 0.02 + (1.0 - eff_lambda) * 0.04;
+    let lambda_low = (eff_lambda - lambda_uncertainty).max(0.0);
+    let lambda_high = (eff_lambda + lambda_uncertainty).min(1.0);
+
+    QueryResult {
+        sample_file: String::new(),
+        genome_file: String::new(),
+        contig_name: String::new(),
+        adjusted_ani,
+        eff_cov,
+        ani_percentile: (ani_low, ani_high),
+        eff_lambda,
+        lambda_percentile: (lambda_low, lambda_high),
+        median_cov: 1.0,
+        mean_cov_geq1: 1.0,
+        containment_ind: format!("{}/{}", shared_tags, total_ref_tags),
+        naive_ani,
+        ref_tags: total_ref_tags,
+        shared_tags,
+        query_tags,
+        taxonomic_abundance: 0.0,
+        sequence_abundance: 0.0,
+    }
+}
+
+// ==================== 修复的过滤函数 ====================
+// FIX: 删除早期返回，强制执行所有过滤条件
+fn filter_results(result: &QueryResult, min_ani: Option<f64>) -> bool {
+    // 没有共享标签直接过滤
+    if result.shared_tags == 0 {
+        return false;
+    }
+
+    // FIX: 删除这个导致假阳性的早期返回！
+    // if result.shared_tags > 0 { return true; }
+
+    // FIX: 强制执行最小共享标签数过滤
+    if result.shared_tags < MIN_SHARED_TAGS {
+        return false;
+    }
+
+    // FIX: 强制执行最小覆盖度过滤
+    if result.eff_cov < MIN_COVERAGE {
+        return false;
+    }
+
+    // FIX: 强制执行 ANI 过滤
+    let effective_min_ani = min_ani.unwrap_or(MIN_ANI);
+    if result.adjusted_ani < effective_min_ani {
+        return false;
+    }
+
+    true
+}
+
+// FIX: 同样修复 profile 专用的过滤函数
+fn filter_results_for_profile(result: &QueryResult, min_ani: Option<f64>) -> bool {
+    if result.shared_tags == 0 {
+        return false;
+    }
+
+    // FIX: profile 模式需要更严格的过滤
+    if result.shared_tags < MIN_SHARED_TAGS {
+        return false;
+    }
+
+    if result.eff_cov < PROFILE_MIN_COVERAGE {
+        return false;
+    }
+
+    let effective_min_ani = min_ani.unwrap_or(PROFILE_MIN_ANI);
+    if result.adjusted_ani < effective_min_ani {
+        return false;
+    }
+
+    if result.ref_tags < MIN_TAGS_FOR_GENOME {
+        return false;
+    }
+
+    true
+}
     }
 }
 
@@ -739,11 +674,18 @@ fn calculate_statistics(shared_tags: usize, query_tags: usize, total_ref_tags: u
     // 只有当共享标签数大于最小要求时才计算 ANI
     let (naive_ani, adjusted_ani) = if shared_tags >= MIN_SHARED_TAGS {
         let naive = f64::powf(containment_ratio, 1.0 / K) * 100.0;
-        // FIX: 删除 coverage_factor 调整，使用纯 containment ANI
-        (naive, naive)
+        
+        // 计算调整后的 ANI
+        let coverage_factor = if containment_ratio < 0.1 {
+            1.0 + (0.1 - containment_ratio) * 0.5
+        } else {
+            1.0
+        };
+        let adjusted = (naive * coverage_factor).min(100.0);
+        (naive, adjusted)
     } else {
-        // FIX: 共享标签不足时，ANI 应该接近 0 而不是 80%
-        let base_ani = (shared_tags_f64 / MIN_SHARED_TAGS as f64) * 30.0;
+        // 当共享标签数太少时，ANI 应该很低但不一定是 0
+        let base_ani = (shared_tags_f64 / MIN_SHARED_TAGS as f64) * 80.0; // 使用 80% 作为基准
         (base_ani, base_ani)
     };
     
@@ -792,21 +734,27 @@ fn calculate_statistics(shared_tags: usize, query_tags: usize, total_ref_tags: u
 }
 
 fn filter_results(result: &QueryResult, min_ani: Option<f64>) -> bool {
+    // 只有在有共享标签时才进行过滤
     if result.shared_tags == 0 {
         return false;
     }
 
-    // FIX: 删除导致假阳性的早期返回，强制执行所有过滤条件
-    if result.shared_tags < MIN_SHARED_TAGS {
-        return false;
+    // 当计算丰度时，只要有共享标签就包含在结果中
+    if result.shared_tags > 0 {
+        return true;
     }
 
+    // 基本过滤条件
     if result.eff_cov < MIN_COVERAGE {
         return false;
     }
 
-    let effective_min_ani = min_ani.unwrap_or(MIN_ANI);
-    if result.adjusted_ani < effective_min_ani {
+    // ANI 过滤
+    if let Some(min_ani) = min_ani {
+        if result.adjusted_ani < min_ani {
+            return false;
+        }
+    } else if result.adjusted_ani < MIN_ANI {
         return false;
     }
 
