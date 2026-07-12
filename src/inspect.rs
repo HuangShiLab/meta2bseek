@@ -182,15 +182,15 @@ fn inspect_file(file_path: &str) -> Result<InspectResult> {
     let reader = BufReader::new(file);
 
     match path.extension().and_then(|s| s.to_str()) {
-        Some("syldb") => inspect_syldb(reader, file_path),
-        Some("sylsp") => inspect_sylsp(reader, file_path),
-        _ => Err(anyhow::anyhow!("Unknown file extension, expected .syldb or .sylsp")),
+        Some("db") => inspect_db(reader, file_path),
+        Some("sp") => inspect_sp(reader, file_path),
+        _ => Err(anyhow::anyhow!("Unknown file extension, expected .db or .sp")),
     }
 }
 
-fn inspect_syldb(reader: BufReader<File>, file_path: &str) -> Result<InspectResult> {
+fn inspect_db(reader: BufReader<File>, file_path: &str) -> Result<InspectResult> {
     let entries: Vec<crate::extract::SyldbEntry> = bincode::deserialize_from(reader)
-        .context("Failed to deserialize .syldb file")?;
+        .context("Failed to deserialize .db file")?;
 
     let mut tag_lengths = Vec::new();
     let mut genome_sources = std::collections::HashSet::new();
@@ -295,9 +295,9 @@ fn inspect_syldb(reader: BufReader<File>, file_path: &str) -> Result<InspectResu
     })
 }
 
-fn inspect_sylsp(reader: BufReader<File>, file_path: &str) -> Result<InspectResult> {
+fn inspect_sp(reader: BufReader<File>, file_path: &str) -> Result<InspectResult> {
     let entries: Vec<crate::extract::SylspEntry> = bincode::deserialize_from(reader)
-        .context("Failed to deserialize .sylsp file")?;
+        .context("Failed to deserialize .sp file")?;
 
     let mut tag_lengths = Vec::new();
     let mut sample_stats = std::collections::HashMap::new();

@@ -2,7 +2,7 @@ use clap::{Args, Parser, Subcommand};
 // pub(crate) use crate::constants::*;
 
 #[derive(Parser)]
-#[clap(author, version, about = "Ultrafast genome ANI queries and taxonomic profiling for metagenomic shotgun samples.\n\n--- Preparing inputs by extracting (indexing) 2bRAD tags\n## fastq (reads) and fasta (genomes all at once)\n## *.sylsp found in -d; *.syldb given by -o\nmeta2bseek extract -t 5 sample1.fq sample2.fq genome1.fa genome2.fa -o genome1+genome2 -d sample_dir\n\n## paired-end reads\nmeta2bseek extract -1 a_1.fq b_1.fq -2 b_2.fq b_2.fq -d paired_extracts\n\n## batch process reads from a list file\nmeta2bseek extract -s reads_list.txt -d batch_output --out-name batch_process\n\n--- Nearest neighbour containment ANI\nmeta2bseek query *.syldb *.sylsp > all-to-all-query.tsv\n\n--- Taxonomic profiling with relative abundances and ANI\nmeta2bseek profile *.syldb *.sylsp > all-to-all-profile.tsv", arg_required_else_help = true, disable_help_subcommand = true)]
+#[clap(author, version, about = "Ultrafast genome ANI queries and taxonomic profiling for metagenomic shotgun samples.\n\n--- Preparing inputs by extracting (indexing) 2bRAD tags\n## fastq (reads) and fasta (genomes all at once)\n## *.sp found in -d; *.db given by -o\nmeta2bseek extract -t 5 sample1.fq sample2.fq genome1.fa genome2.fa -o genome1+genome2 -d sample_dir\n\n## paired-end reads\nmeta2bseek extract -1 a_1.fq b_1.fq -2 b_2.fq b_2.fq -d paired_extracts\n\n## batch process reads from a list file\nmeta2bseek extract -s reads_list.txt -d batch_output --out-name batch_process\n\n--- Nearest neighbour containment ANI\nmeta2bseek query *.db *.sp > all-to-all-query.tsv\n\n--- Taxonomic profiling with relative abundances and ANI\nmeta2bseek profile *.db *.sp > all-to-all-profile.tsv", arg_required_else_help = true, disable_help_subcommand = true)]
 pub struct Cli {
     #[clap(subcommand,)]
     pub mode: Mode,
@@ -10,10 +10,10 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Mode {
-    /// extract sequences into samples (reads) and databases (genomes). Each sample.fq -> sample.sylsp. All *.fa -> *.syldb. 
+    /// extract sequences into samples (reads) and databases (genomes). Each sample.fq -> sample.sp. All *.fa -> *.db. 
     #[clap(display_order = 1)]
     Extract(ExtractArgs),
-    /// sketch sequences using k-mer sampling (similar to sylph). Each sample.fq -> sample.sylsp. All *.fa -> *.syldb.
+    /// sketch sequences using k-mer sampling (similar to sylph). Each sample.fq -> sample.sp. All *.fa -> *.db.
     #[clap(display_order = 2)]
     Sketch(SketchArgs),
     /// Coverage-adjusted ANI querying between databases and samples.
@@ -22,13 +22,13 @@ pub enum Mode {
     ///Species-level taxonomic profiling with abundances and ANIs. 
     #[clap(display_order = 3)]
     Profile(ProfileArgs),
-    ///Inspect extracted .syldb and .sylsp files.
+    ///Inspect extracted .db and .sp files.
     #[clap(arg_required_else_help = true, display_order = 5)]
     Inspect(InspectArgs),
-    ///View sketched .syldb and .sylsp files (Meta2bseek sketch format).
+    ///View sketched .db and .sp files (Meta2bseek sketch format).
     #[clap(arg_required_else_help = true, display_order = 6)]
     View(ViewArgs),
-    ///Mark unique (taxa-specific) tags in .syldb files.
+    ///Mark unique (taxa-specific) tags in .db files.
     #[clap(arg_required_else_help = true, display_order = 7)]
     Mark(MarkArgs),
 }
@@ -39,7 +39,7 @@ pub struct ExtractArgs {
     #[clap(short='g', long="genomes", num_args=1.., help_heading = "GENOME INPUT", help = "One or more genome files in fasta format")]
     pub genomes: Option<Vec<String>>,
 
-    #[clap(short='k', long="genome-list", help_heading = "GENOME INPUT", help = "Text file containing paths to genome files (one per line)")]
+    #[clap(short='k', long="genome-list", help_heading = "GENOME INPUT", help = "Genome list file: two-column TSV (genome_id<TAB>fasta_path) or one path per line")]
     pub genome_list: Option<String>,
 
     #[clap(short='r', long="reads", num_args=1.., help_heading = "READ INPUT", help = "One or more fastq files for reads")]
@@ -93,7 +93,7 @@ pub struct SketchArgs {
     #[clap(short='g', long="genomes", num_args=1.., help_heading = "GENOME INPUT", help = "One or more genome files in fasta format")]
     pub genomes: Option<Vec<String>>,
 
-    #[clap(short='k', long="genome-list", help_heading = "GENOME INPUT", help = "Text file containing paths to genome files (one per line)")]
+    #[clap(short='k', long="genome-list", help_heading = "GENOME INPUT", help = "Genome list file: two-column TSV (genome_id<TAB>fasta_path) or one path per line")]
     pub genome_list: Option<String>,
 
     #[clap(short='r', long="reads", num_args=1.., help_heading = "READ INPUT", help = "One or more fastq files for reads")]
@@ -114,10 +114,10 @@ pub struct SketchArgs {
     #[clap(long="l2", help_heading = "BATCH PAIRED READ INPUT", help = "Text file containing paths to second pair of paired-end reads (one per line)")]
     pub second_pair_list: Option<String>,
 
-    #[clap(short='o', long="output", default_value = ".", help_heading = "OUTPUT", help = "Output directory for genome sketches (.syldb files)")]
+    #[clap(short='o', long="output", default_value = ".", help_heading = "OUTPUT", help = "Output directory for genome sketches (.db files)")]
     pub output_dir: String,
 
-    #[clap(short='d', long="sample-dir", default_value = ".", help_heading = "OUTPUT", help = "Output directory for sample sketches (.sylsp files)")]
+    #[clap(short='d', long="sample-dir", default_value = ".", help_heading = "OUTPUT", help = "Output directory for sample sketches (.sp files)")]
     pub sample_output_dir: String,
 
     #[clap(short='t', long="threads", default_value_t = 3, help = "Number of threads")]
@@ -177,7 +177,7 @@ pub struct SketchArgs {
 
 #[derive(Args)]
 pub struct ContainArgs {
-    #[clap(num_args=1.., help = "Pre-extracted *.syldb/*.sylsp files. Raw single-end fastq/fasta are allowed and will be automatically extracted to .sylsp/.syldb")]
+    #[clap(num_args=1.., help = "Pre-extracted *.db/*.sp files. Raw single-end fastq/fasta are allowed and will be automatically extracted to .sp/.db")]
     pub files: Vec<String>,
 
     #[clap(short='l', long="list", help = "Newline delimited file of file inputs",help_heading = "INPUT/OUTPUT")]
@@ -255,7 +255,7 @@ pub struct ContainArgs {
 
 #[derive(Args)]
 pub struct InspectArgs {
-    #[clap(num_args=1.., help = "Pre-extracted *.syldb/*.sylsp files.")]
+    #[clap(num_args=1.., help = "Pre-extracted *.db/*.sp files.")]
     pub files: Vec<String>,
     #[clap(short='o',long="output-file", help = "Output to this file (YAML format). [default: stdout]")]
     pub out_file_name: Option<String>,
@@ -306,7 +306,7 @@ pub struct QueryArgs {
 
 #[derive(Args)]
 pub struct ViewArgs {
-    #[clap(num_args=1.., help = "Pre-sketched *.syldb/*.sylsp files (Meta2bseek sketch format).")]
+    #[clap(num_args=1.., help = "Pre-sketched *.db/*.sp files (Meta2bseek sketch format).")]
     pub files: Vec<String>,
     #[clap(short='o',long="output-file", help = "Output to this file (YAML format). [default: stdout]")]
     pub out_file_name: Option<String>,
@@ -318,10 +318,10 @@ pub struct ViewArgs {
 
 #[derive(Args)]
 pub struct MarkArgs {
-    #[clap(help = "Input .syldb file to mark unique tags")]
+    #[clap(help = "Input .db file to mark unique tags")]
     pub input_file: String,
     
-    #[clap(short='o', long="output", help = "Output .syldb file with unique tags marked. If not specified, overwrites input file")]
+    #[clap(short='o', long="output", help = "Output .db file with unique tags marked. If not specified, overwrites input file")]
     pub output_file: Option<String>,
     
     #[clap(long="debug", help = "Enable debug output")]

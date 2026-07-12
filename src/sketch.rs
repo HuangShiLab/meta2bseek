@@ -41,8 +41,8 @@ const BYTE_TO_SEQ: [u8; 256] = [
     4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
 ];
 
-const SAMPLE_FILE_SUFFIX: &str = ".sylsp";
-const QUERY_FILE_SUFFIX: &str = ".syldb";
+const SAMPLE_FILE_SUFFIX: &str = ".sp";
+const QUERY_FILE_SUFFIX: &str = ".db";
 const MAX_DEDUP_COUNT: u32 = 10000;
 
 // 文件格式检查函数
@@ -417,7 +417,7 @@ fn check_args_valid(args: &SketchArgs) -> Result<()> {
     Ok(())
 }
 
-// 解析文件列表
+// 解析文件列表（单列：每行一个路径）
 fn parse_line_file(file_name: &str) -> Result<Vec<String>> {
     let file = File::open(file_name)
         .with_context(|| format!("Failed to open file list: {}", file_name))?;
@@ -434,11 +434,57 @@ fn parse_line_file(file_name: &str) -> Result<Vec<String>> {
     Ok(result)
 }
 
+// 解析基因组列表文件，支持两种格式：
+// 1. 单列：每行一个文件路径（向后兼容）
+// 2. 两列TSV：genome_id<TAB>file_path
+// 返回 Vec<(genome_id, file_path)>
+fn parse_genome_list_file(file_name: &str) -> Result<Vec<(String, String)>> {
+    let file = File::open(file_name)
+        .with_context(|| format!("Failed to open genome list file: {}", file_name))?;
+    let reader = BufReader::new(file);
+    let mut result = Vec::new();
+    
+    for line in reader.lines() {
+        let line = line.with_context(|| "Failed to read line from genome list")?;
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        
+        if let Some(tab_pos) = line.find('\t') {
+            // 两列格式: genome_id\tpath
+            let genome_id = line[..tab_pos].trim().to_string();
+            let path = line[tab_pos + 1..].trim().to_string();
+            if !genome_id.is_empty() && !path.is_empty() {
+                result.push((genome_id, path));
+            }
+        } else {
+            // 单列格式：从文件名推导 genome_id
+            let path = line.to_string();
+            let genome_id = Path::new(&path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&path)
+                .strip_suffix(".fasta.gz")
+                .or_else(|| Path::new(&path).file_name().and_then(|s| s.to_str()).unwrap_or(&path).strip_suffix(".fasta"))
+                .or_else(|| Path::new(&path).file_name().and_then(|s| s.to_str()).unwrap_or(&path).strip_suffix(".fa.gz"))
+                .or_else(|| Path::new(&path).file_name().and_then(|s| s.to_str()).unwrap_or(&path).strip_suffix(".fa"))
+                .or_else(|| Path::new(&path).file_name().and_then(|s| s.to_str()).unwrap_or(&path).strip_suffix(".fna.gz"))
+                .or_else(|| Path::new(&path).file_name().and_then(|s| s.to_str()).unwrap_or(&path).strip_suffix(".fna"))
+                .unwrap_or_else(|| Path::new(&path).file_name().and_then(|s| s.to_str()).unwrap_or(&path))
+                .to_string();
+            result.push((genome_id, path));
+        }
+    }
+    
+    Ok(result)
+}
+
 // 解析模糊输入文件
 fn parse_ambiguous_files(
     args: &SketchArgs,
     read_inputs: &mut Vec<String>,
-    genome_inputs: &mut Vec<String>,
+    genome_inputs: &mut Vec<(String, String)>,
 ) -> Result<()> {
     let mut all_files = vec![];
     
@@ -453,7 +499,12 @@ fn parse_ambiguous_files(
         if is_fastq(&file) {
             read_inputs.push(file);
         } else if is_fasta(&file) {
-            genome_inputs.push(file);
+            let genome_id = Path::new(&file)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&file)
+                .to_string();
+            genome_inputs.push((genome_id, file));
         } else {
             warn!(
                 "{} does not have a fasta/fastq/gzip type extension; skipping",
@@ -469,10 +520,17 @@ fn parse_ambiguous_files(
 fn parse_reads_and_genomes(
     args: &SketchArgs,
     read_inputs: &mut Vec<String>,
-    genome_inputs: &mut Vec<String>,
+    genome_inputs: &mut Vec<(String, String)>,
 ) -> Result<()> {
     if let Some(genomes) = &args.genomes {
-        genome_inputs.extend(genomes.clone());
+        for g in genomes {
+            let genome_id = Path::new(g)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(g)
+                .to_string();
+            genome_inputs.push((genome_id, g.clone()));
+        }
     }
     
     if let Some(reads) = &args.reads {
@@ -485,8 +543,9 @@ fn parse_reads_and_genomes(
     }
 
     if let Some(genome_list) = &args.genome_list {
-        let files = parse_line_file(genome_list)?;
-        genome_inputs.extend(files);
+        let genome_entries = parse_genome_list_file(genome_list)?;
+        info!("Parsed {} genomes from genome list file", genome_entries.len());
+        genome_inputs.extend(genome_entries);
     }
     
     Ok(())
@@ -935,21 +994,18 @@ fn generate_merged_sample_file(
 // 生成合并的基因组数据库文件
 fn generate_merged_genome_file(
     args: &SketchArgs,
-    genome_inputs: &[String],
+    genome_inputs: &[(String, String)],
 ) -> Result<()> {
     let mut all_sketches = Vec::new();
     
     // 读取所有基因组的sketch文件
-    for genome_file in genome_inputs.iter() {
-        let genome_path = Path::new(genome_file);
-        let file_stem = genome_path.file_stem().unwrap().to_str().unwrap();
-        
+    for (genome_id, _genome_file) in genome_inputs.iter() {
         if args.individual {
             // 对于individual模式，可能有多个文件
             let mut file_index = 0;
             loop {
                 let individual_path = Path::new(&args.output_dir)
-                    .join(format!("{}_{}{}", file_stem, file_index, QUERY_FILE_SUFFIX));
+                    .join(format!("{}_{}{}", genome_id, file_index, QUERY_FILE_SUFFIX));
                 
                 if individual_path.exists() {
                     let file = File::open(&individual_path)
@@ -965,7 +1021,7 @@ fn generate_merged_genome_file(
             }
         } else {
             let individual_path = Path::new(&args.output_dir)
-                .join(format!("{}{}", file_stem, QUERY_FILE_SUFFIX));
+                .join(format!("{}{}", genome_id, QUERY_FILE_SUFFIX));
             
             if individual_path.exists() {
                 let file = File::open(&individual_path)
@@ -1000,7 +1056,7 @@ fn generate_merged_genome_file(
 // 主sketch函数
 pub fn sketch(args: SketchArgs) -> Result<()> {
     let mut read_inputs = vec![];
-    let mut genome_inputs = vec![];
+    let mut genome_inputs: Vec<(String, String)> = vec![];
     let mut first_pairs = vec![];
     let mut second_pairs = vec![];
 
@@ -1145,10 +1201,10 @@ pub fn sketch(args: SketchArgs) -> Result<()> {
             .with_context(|| "Could not create directory for output database files (-o)")?;
 
         iter_vec.into_par_iter().try_for_each(|i| -> Result<()> {
-            let genome_file = &genome_inputs[i];
+            let (ref genome_id, ref genome_file) = genome_inputs[i];
             
             if args.individual {
-                let indiv_gn_sketches = sketch_genome_individual(
+                let mut indiv_gn_sketches = sketch_genome_individual(
                     args.c,
                     args.k,
                     genome_file,
@@ -1156,11 +1212,14 @@ pub fn sketch(args: SketchArgs) -> Result<()> {
                     !args.no_pseudotax,
                 )?;
                 
+                // 设置 genome_id 到每个 sketch
+                for sketch in &mut indiv_gn_sketches {
+                    sketch.file_name = genome_id.clone();
+                }
+                
                 // 生成单个基因组文件的子文件
                 for (j, sketch) in indiv_gn_sketches.iter().enumerate() {
-                    let genome_path = Path::new(genome_file);
-                    let file_stem = genome_path.file_stem().unwrap().to_str().unwrap();
-                    let individual_path = output_dir.join(format!("{}_{}{}", file_stem, j, QUERY_FILE_SUFFIX));
+                    let individual_path = output_dir.join(format!("{}_{}{}", genome_id, j, QUERY_FILE_SUFFIX));
                     
                     let mut individual_file = BufWriter::new(
                         File::create(&individual_path)
@@ -1171,7 +1230,7 @@ pub fn sketch(args: SketchArgs) -> Result<()> {
                     info!("Individual genome sketch {} complete.", individual_path.display());
                 }
             } else {
-                let genome_sketch = sketch_genome(
+                let mut genome_sketch = sketch_genome(
                     args.c,
                     args.k,
                     genome_file,
@@ -1179,10 +1238,11 @@ pub fn sketch(args: SketchArgs) -> Result<()> {
                     !args.no_pseudotax,
                 )?;
                 
+                // 设置 genome_id
+                genome_sketch.file_name = genome_id.clone();
+                
                 // 生成单个基因组文件的子文件
-                let genome_path = Path::new(genome_file);
-                let file_stem = genome_path.file_stem().unwrap().to_str().unwrap();
-                let individual_path = output_dir.join(format!("{}{}", file_stem, QUERY_FILE_SUFFIX));
+                let individual_path = output_dir.join(format!("{}{}", genome_id, QUERY_FILE_SUFFIX));
                 
                 let mut individual_file = BufWriter::new(
                     File::create(&individual_path)

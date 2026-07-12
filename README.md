@@ -98,7 +98,7 @@ Ultrafast genome ANI queries and taxonomic profiling for metagenomic shotgun sam
 
 --- Preparing inputs by extracting (indexing) 2bRAD tags
 ## fastq (reads) and fasta (genomes all at once)
-## *.sylsp found in -d; *.syldb given by -o
+## *.sp found in -d; *.db given by -o
 meta2bseek extract -t 5 sample1.fq sample2.fq genome1.fa genome2.fa -o genome1+genome2 -d sample_dir
 
 ## paired-end reads
@@ -108,21 +108,21 @@ meta2bseek extract -1 a_1.fq b_1.fq -2 b_2.fq b_2.fq -d paired_extracts
 meta2bseek extract -s reads_list.txt -d batch_output --out-name batch_process
 
 --- Nearest neighbour containment ANI
-meta2bseek query *.syldb *.sylsp > all-to-all-query.tsv
+meta2bseek query *.db *.sp > all-to-all-query.tsv
 
 --- Taxonomic profiling with relative abundances and ANI
-meta2bseek profile *.syldb *.sylsp > all-to-all-profile.tsv
+meta2bseek profile *.db *.sp > all-to-all-profile.tsv
 
 Usage: meta2bseek <COMMAND>
 
 Commands:
-  extract  extract sequences into samples (reads) and databases (genomes). Each sample.fq -> sample.sylsp. All *.fa -> *.syldb
-  sketch   sketch sequences using k-mer sampling (similar to sylph). Each sample.fq -> sample.sylsp. All *.fa -> *.syldb
+  extract  extract sequences into samples (reads) and databases (genomes). Each sample.fq -> sample.sp. All *.fa -> *.db
+  sketch   sketch sequences using k-mer sampling (similar to sylph). Each sample.fq -> sample.sp. All *.fa -> *.db
   profile  Species-level taxonomic profiling with abundances and ANIs
   query    Coverage-adjusted ANI querying between databases and samples
-  inspect  Inspect extracted .syldb and .sylsp files
-  view     View sketched .syldb and .sylsp files (Meta2bseek sketch format)
-  mark     Mark unique (taxa-specific) tags in .syldb files
+  inspect  Inspect extracted .db and .sp files
+  view     View sketched .db and .sp files (Meta2bseek sketch format)
+  mark     Mark unique (taxa-specific) tags in .db files
 
 Options:
   -h, --help     Print help
@@ -149,7 +149,7 @@ meta2bseek extract -t 8 -k genome_list.txt --sample-output-dir /path/to/output -
 # Note: 8 is the number of threads you want to used
 ```
 
-•	**Output:** A .syldb file (e.g., reference_db.syldb) in the specified output directory.
+•	**Output:** A .db file (e.g., reference_db.db) in the specified output directory.
 
 **For Sample Sequences**
 
@@ -170,7 +170,7 @@ meta2bseek extract -t 8 -k genome_list.txt --sample-output-dir /path/to/output -
 meta2bseek extract -t 8 -s sample_list.txt --sample-output-dir /path/to/output --out-name samples
 ```
 
-•	**Output:** A .sylsp file (e.g., samples.sylsp) in the specified output directory.
+•	**Output:** A .sp file (e.g., samples.sp) in the specified output directory.
 
 - For paired-end sequencing samples:
 
@@ -198,13 +198,13 @@ meta2bseek extract -t 8 -s sample_list.txt --sample-output-dir /path/to/output -
 meta2bseek extract -t 20 --l1 sample_left_list.txt  --l2 sample_right_list.txt --sample-output-dir /path/to/output --out-name samples)
 ```
 
-•	**Output:** A .sylsp file (e.g., samples.sylsp) in the specified output directory.
+•	**Output:** A .sp file (e.g., samples.sp) in the specified output directory.
 
 **Usages:**
 ```
 meta2bseek extract -h
 
-extract sequences into samples (reads) and databases (genomes). Each sample.fq -> sample.sylsp. All *.fa -> *.syldb
+extract sequences into samples (reads) and databases (genomes). Each sample.fq -> sample.sp. All *.fa -> *.db
 
 Usage: meta2bseek extract [OPTIONS] --sample-output-dir <SAMPLE_OUTPUT_DIR>
 
@@ -245,18 +245,18 @@ MEMORY:
       --max-ram <MAX_RAM>  Maximum RAM usage in GB (default: 16)
 ```
 
-### `inspect`: Inspect extracted .syldb and .sylsp files
+### `inspect`: Inspect extracted .db and .sp files
 
 **Usage:**
 ```
 meta2bseek inspect -h
 
-Inspect extracted .syldb and .sylsp files
+Inspect extracted .db and .sp files
 
 Usage: meta2bseek inspect [OPTIONS] [FILES]...
 
 Arguments:
-  [FILES]...  Pre-extracted *.syldb/*.sylsp files.
+  [FILES]...  Pre-extracted *.db/*.sp files.
 
 Options:
   -o, --output-file <OUT_FILE_NAME>  Output to this file (YAML format). [default: stdout]
@@ -274,7 +274,7 @@ Coverage-adjusted ANI querying between databases and samples
 Usage: meta2bseek query [OPTIONS] [FILES]...
 
 Arguments:
-  [FILES]...  Pre-extracted *.syldb/*.sylsp files. Raw single-end fastq/fasta are allowed and will be automatically extracted to .sylsp/.syldb
+  [FILES]...  Pre-extracted *.db/*.sp files. Raw single-end fastq/fasta are allowed and will be automatically extracted to .sp/.db
 
 Options:
   -t <THREADS>
@@ -318,8 +318,8 @@ extracting:
 ### `profile`: Species-level taxonomic profiling with abundances and ANIs
 
 **Required Inputs**  
-•	`.sylsp` file (from sample extraction).  
-•	`.syldb` file (from reference genome extraction).  
+•	`.sp` file (from sample extraction).  
+•	`.db` file (from reference genome extraction).  
 
 **Optional Input**  
 
@@ -337,8 +337,8 @@ RS_GCF_001072555.1	d__Bacteria;p__Bacillota;c__Bacilli;o__Staphylococcales;f__St
 
 ```
 meta2bseek profile \  
-  --sample-file samples.sylsp \  
-  --db-file reference_db.syldb \  
+  --sample-file samples.sp \  
+  --db-file reference_db.db \  
   --log-path /path/to/output \  
   --tsv-name profiling_results \  
   --threads 8 \  

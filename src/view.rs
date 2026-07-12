@@ -176,20 +176,20 @@ fn view_file(file_path: &str) -> Result<ViewResult> {
     let reader = BufReader::new(file);
 
     match path.extension().and_then(|s| s.to_str()) {
-        Some("syldb") => view_syldb(reader, file_path),
-        Some("sylsp") => view_sylsp(reader, file_path),
-        _ => Err(anyhow::anyhow!("Unknown file extension, expected .syldb or .sylsp")),
+        Some("db") => view_db(reader, file_path),
+        Some("sp") => view_sp(reader, file_path),
+        _ => Err(anyhow::anyhow!("Unknown file extension, expected .db or .sp")),
     }
 }
 
-fn view_syldb(reader: BufReader<File>, file_path: &str) -> Result<ViewResult> {
+fn view_db(reader: BufReader<File>, file_path: &str) -> Result<ViewResult> {
     println!("Attempting to deserialize {} as genome sketches...", file_path);
     
     let entries: Vec<GenomeSketch> = bincode::deserialize_from(reader)
-        .with_context(|| format!("Failed to deserialize .syldb file: {}", file_path))?;
+        .with_context(|| format!("Failed to deserialize .db file: {}", file_path))?;
 
     if entries.is_empty() {
-        return Err(anyhow::anyhow!("Empty .syldb file"));
+        return Err(anyhow::anyhow!("Empty .db file"));
     }
 
     println!("Successfully deserialized {} genome sketches from {}", entries.len(), file_path);
@@ -272,13 +272,13 @@ fn view_syldb(reader: BufReader<File>, file_path: &str) -> Result<ViewResult> {
     })
 }
 
-fn view_sylsp(reader: BufReader<File>, file_path: &str) -> Result<ViewResult> {
+fn view_sp(reader: BufReader<File>, file_path: &str) -> Result<ViewResult> {
     // 尝试反序列化为单个SequencesSketch
     let single_sketch: Result<SequencesSketch, _> = bincode::deserialize_from(reader);
     
     if let Ok(sketch) = single_sketch {
         // 单个样本文件
-        return view_single_sylsp(sketch, file_path);
+        return view_single_sp(sketch, file_path);
     }
     
     // 如果单个反序列化失败，尝试作为多个sketch的列表
@@ -292,7 +292,7 @@ fn view_sylsp(reader: BufReader<File>, file_path: &str) -> Result<ViewResult> {
     
     if let Ok(sketches) = sketches {
         if sketches.is_empty() {
-            return Err(anyhow::anyhow!("Empty .sylsp file"));
+            return Err(anyhow::anyhow!("Empty .sp file"));
         }
 
         println!("Successfully deserialized {} sketches from {}", sketches.len(), file_path);
@@ -389,7 +389,7 @@ fn view_sylsp(reader: BufReader<File>, file_path: &str) -> Result<ViewResult> {
     return Err(anyhow::anyhow!("File format not recognized. This file may be in sylph format or corrupted."));
 }
 
-fn view_single_sylsp(sketch: SequencesSketch, file_path: &str) -> Result<ViewResult> {
+fn view_single_sp(sketch: SequencesSketch, file_path: &str) -> Result<ViewResult> {
     let mut kmer_lengths = Vec::new();
     let mut kmer_frequency = std::collections::HashMap::new();
     let mut per_sample_kmer_counts: std::collections::HashMap<String, std::collections::HashMap<Hash, u32>> = std::collections::HashMap::new();

@@ -23,14 +23,14 @@ pub struct GenomeStats {
 pub fn mark(args: MarkArgs) -> Result<()> {
     println!("开始标记unique tags...");
     
-    // 读取.syldb文件
+    // 读取.db文件
     let input_path = Path::new(&args.input_file);
-    let syldb_entries = read_syldb_file(input_path)?;
+    let db_entries = read_db_file(input_path)?;
     
-    println!("已读取 {} 个syldb条目", syldb_entries.len());
+    println!("已读取 {} 个db条目", db_entries.len());
     
     // 分析并标记unique tags
-    let marked_entries = mark_unique_tags(syldb_entries)?;
+    let marked_entries = mark_unique_tags(db_entries)?;
     
     // 生成统计信息
     let stats = generate_statistics(&marked_entries);
@@ -43,21 +43,21 @@ pub fn mark(args: MarkArgs) -> Result<()> {
         input_path.to_path_buf()
     };
     
-    write_syldb_file(&output_path, &marked_entries)?;
+    write_db_file(&output_path, &marked_entries)?;
     
     println!("标记完成，已写入文件: {}", output_path.display());
     
     Ok(())
 }
 
-/// 读取.syldb文件
-fn read_syldb_file(path: &Path) -> Result<Vec<SyldbEntry>> {
+/// 读取.db文件
+fn read_db_file(path: &Path) -> Result<Vec<SyldbEntry>> {
     let file = File::open(path)
         .context(format!("无法打开文件: {}", path.display()))?;
     let reader = BufReader::new(file);
     
     let entries: Vec<SyldbEntry> = bincode::deserialize_from(reader)
-        .context("无法反序列化syldb文件")?;
+        .context("无法反序列化db文件")?;
     
     Ok(entries)
 }
@@ -165,14 +165,14 @@ fn print_statistics(stats: &[GenomeStats]) {
     }
 }
 
-/// 写入.syldb文件
-fn write_syldb_file(path: &Path, entries: &[SyldbEntry]) -> Result<()> {
+/// 写入.db文件
+fn write_db_file(path: &Path, entries: &[SyldbEntry]) -> Result<()> {
     let file = File::create(path)
         .context(format!("无法创建文件: {}", path.display()))?;
     let writer = BufWriter::new(file);
     
     bincode::serialize_into(writer, entries)
-        .context("无法序列化syldb数据")?;
+        .context("无法序列化db数据")?;
     
     Ok(())
 }
@@ -188,14 +188,12 @@ mod tests {
             SyldbEntry {
                 sequence_id: "seq1".to_string(),
                 tags: vec![hash_bytes(b"ATGC"), hash_bytes(b"CGTA")],
-                positions: vec![0, 1],
                 genome_source: "genome_a.fa".to_string(),
                 tag_uniqueness: None,
             },
             SyldbEntry {
                 sequence_id: "seq2".to_string(),
                 tags: vec![hash_bytes(b"ATGC"), hash_bytes(b"TTTT")],
-                positions: vec![0, 1],
                 genome_source: "genome_b.fa".to_string(),
                 tag_uniqueness: None,
             },
