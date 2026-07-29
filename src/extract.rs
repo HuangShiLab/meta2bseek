@@ -71,9 +71,10 @@ fn calculate_optimal_buffer_size(file_size: u64, is_compressed: bool) -> usize {
 
 
 // 内存监控函数，参考sketch中的check_vram_and_block
+// 使用 physical_mem 而非 virtual_mem，避免 macOS 上虚拟地址空间过大导致死锁。
 pub fn check_vram_and_block(max_ram: usize, file: &str) {
     if let Some(usage) = memory_stats() {
-        let mut gb_usage_curr = usage.virtual_mem as f64 / 1_000_000_000 as f64;
+        let mut gb_usage_curr = usage.physical_mem as f64 / 1_000_000_000 as f64;
         if (max_ram as f64) < gb_usage_curr {
             log::debug!(
                 "Max memory reached. Blocking extract for {}. Curr memory {}, max mem {}",
@@ -86,7 +87,7 @@ pub fn check_vram_and_block(max_ram: usize, file: &str) {
             let five_second = Duration::from_secs(1);
             thread::sleep(five_second);
             if let Some(usage) = memory_stats() {
-                gb_usage_curr = usage.virtual_mem as f64 / 1_000_000_000 as f64;
+                gb_usage_curr = usage.physical_mem as f64 / 1_000_000_000 as f64;
                 if (max_ram as f64) >= gb_usage_curr {
                     log::debug!("Extract for {} freed", file);
                 }
@@ -99,7 +100,7 @@ pub fn check_vram_and_block(max_ram: usize, file: &str) {
 
 // 动态内存管理函数
 pub fn get_memory_usage() -> Option<f64> {
-    memory_stats().map(|usage| usage.virtual_mem as f64 / 1_000_000_000 as f64)
+    memory_stats().map(|usage| usage.physical_mem as f64 / 1_000_000_000 as f64)
 }
 
 
@@ -231,32 +232,57 @@ pub const ENZYME_TAG_LENGTHS: &[(&str, usize)] = &[
 pub struct EnzymeSpec {
     pub name: String,
     pub patterns: Vec<Regex>,
-    /// 该酶 tag 的固定长度，在构造时查一次表，避免每条序列都线性扫描 ENZYME_TAG_LENGTHS。
+    /// 每个 pattern 对应的 tag 长度。多酶模式下 pattern 来自不同酶，长度可能不同。
+    pub pattern_tag_lengths: Vec<usize>,
+    /// 主 tag 长度（日志/统计使用，取第一个酶的 tag 长度）。
     pub tag_length: usize,
 }
 
 impl EnzymeSpec {
     pub fn new(name: &str) -> Result<Self> {
-        let def = ENZYME_DEFINITIONS
-            .iter()
-            .find(|(e, _)| *e == name)
-            .ok_or_else(|| anyhow::anyhow!("Unsupported enzyme: {}", name))?;
+        let names: Vec<&str> = if name.eq_ignore_ascii_case("all") {
+            ENZYME_DEFINITIONS.iter().map(|(n, _)| *n).collect()
+        } else {
+            name.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect()
+        };
 
-        let patterns = def.1
-            .iter()
-            .map(|p| Regex::new(p).context(format!("Invalid regex pattern: {}", p)))
-            .collect::<Result<Vec<_>>>()?;
+        if names.is_empty() {
+            return Err(anyhow::anyhow!("No enzyme specified"));
+        }
 
-        let tag_length = ENZYME_TAG_LENGTHS
-            .iter()
-            .find(|(n, _)| *n == def.0)
-            .map(|(_, len)| *len)
-            .ok_or_else(|| anyhow::anyhow!("Missing tag length for enzyme: {}", def.0))?;
+        let mut all_patterns = Vec::new();
+        let mut all_lengths = Vec::new();
+        let mut seen = FxHashSet::default();
+
+        for enzyme_name in &names {
+            if !seen.insert(*enzyme_name) {
+                continue;
+            }
+            let def = ENZYME_DEFINITIONS
+                .iter()
+                .find(|(e, _)| *e == *enzyme_name)
+                .ok_or_else(|| anyhow::anyhow!("Unsupported enzyme: {}", enzyme_name))?;
+
+            let tag_length = ENZYME_TAG_LENGTHS
+                .iter()
+                .find(|(n, _)| *n == def.0)
+                .map(|(_, len)| *len)
+                .ok_or_else(|| anyhow::anyhow!("Missing tag length for enzyme: {}", def.0))?;
+
+            for pat in def.1 {
+                all_patterns.push(Regex::new(pat).context(format!("Invalid regex pattern: {}", pat))?);
+                all_lengths.push(tag_length);
+            }
+        }
+
+        let primary_length = all_lengths[0];
+        let display_name = names.join(",");
 
         Ok(Self {
-            name: def.0.to_string(),
-            patterns,
-            tag_length,
+            name: display_name,
+            patterns: all_patterns,
+            pattern_tag_lengths: all_lengths,
+            tag_length: primary_length,
         })
     }
 }
@@ -293,9 +319,9 @@ fn canonicalize_into(tag: &[u8], buf: &mut [u8; MAX_TAG_LEN]) -> usize {
     n
 }
 
-/// 从序列中提取所有 canonical tag 的哈希（按 u64 去重），不为每个 tag 分配 Vec。
+/// 从序列中提取所有 canonical tag 的哈希及其长度（按 u64 去重），不为每个 tag 分配 Vec。
 /// 下游（syldb/sylsp）只使用 tag 的 u64 哈希，因此这是最热路径的首选。
-fn extract_tag_hashes(seq: &[u8], enzyme: &EnzymeSpec) -> Vec<Hash> {
+fn extract_tag_hashes(seq: &[u8], enzyme: &EnzymeSpec) -> Vec<(Hash, u8)> {
     let mut hashes = Vec::with_capacity(64);
     let mut seen = FxHashSet::default();
     let mut buf = [0u8; MAX_TAG_LEN];
@@ -303,15 +329,15 @@ fn extract_tag_hashes(seq: &[u8], enzyme: &EnzymeSpec) -> Vec<Hash> {
         let n = canonicalize_into(&seq[offset..offset + len], &mut buf);
         let h = hash_bytes(&buf[..n]);
         if seen.insert(h) {
-            hashes.push(h);
+            hashes.push((h, n as u8));
         }
     }
     hashes
 }
 
-/// 与 `extract_tag_hashes` 相同的扫描，但返回 canonical tag 的字节序列（按哈希去重）。
+/// 与 `extract_tag_hashes` 相同的扫描，但返回 canonical tag 的字节序列及其长度（按哈希去重）。
 /// 仅用于需要输出实际 tag 序列（如 reads→FASTA）的少数路径。
-fn extract_canonical_tags(seq: &[u8], enzyme: &EnzymeSpec) -> Vec<TagHash> {
+fn extract_canonical_tags(seq: &[u8], enzyme: &EnzymeSpec) -> Vec<(TagHash, u8)> {
     let mut tags = Vec::with_capacity(64);
     let mut seen = FxHashSet::default();
     let mut buf = [0u8; MAX_TAG_LEN];
@@ -319,10 +345,72 @@ fn extract_canonical_tags(seq: &[u8], enzyme: &EnzymeSpec) -> Vec<TagHash> {
         let n = canonicalize_into(&seq[offset..offset + len], &mut buf);
         let h = hash_bytes(&buf[..n]);
         if seen.insert(h) {
-            tags.push(buf[..n].to_vec());
+            tags.push((buf[..n].to_vec(), n as u8));
         }
     }
     tags
+}
+
+/// 生成 `tag` 的所有 canonical 1-mismatch 变体的哈希。
+/// 每个位置尝试 3 个替代碱基，并对每个变体做 canonical 化（取 forward/revcomp 字典序较小者），
+/// 因此与样本提取时的 canonical 化规则一致。
+pub fn one_mismatch_canonical_hashes(tag: &[u8]) -> Vec<Hash> {
+    let mut out = Vec::with_capacity(tag.len() * 3);
+    let mut buf = [0u8; MAX_TAG_LEN];
+    let mut neighbor_buf = [0u8; MAX_TAG_LEN];
+    for (i, &orig) in tag.iter().enumerate() {
+        for alt in [b'A', b'C', b'G', b'T'] {
+            if alt == orig {
+                continue;
+            }
+            neighbor_buf[..tag.len()].copy_from_slice(tag);
+            neighbor_buf[i] = alt;
+            let n = canonicalize_into(&neighbor_buf[..tag.len()], &mut buf);
+            out.push(hash_bytes(&buf[..n]));
+        }
+    }
+    out
+}
+
+/// 在 exact matching 下，检出概率为 P_cons(a, ℓ) = a^ℓ。
+pub fn p_detect_exact(a: f64, len: usize) -> f64 {
+    a.powi(len as i32)
+}
+
+/// 允许 ≤1 mismatch 时，检出概率为 Σ_{j=0}^{1} C(ℓ,j) (1-a)^j a^{ℓ-j}
+///                         = a^ℓ + ℓ·a^{ℓ-1}·(1-a)。
+pub fn p_detect_one_mismatch(a: f64, len: usize) -> f64 {
+    if len == 0 {
+        return 1.0;
+    }
+    let l = len as f64;
+    let exact = a.powi(len as i32);
+    let one_off = l * a.powi((len - 1) as i32) * (1.0 - a);
+    (exact + one_off).min(1.0)
+}
+
+/// 从观察到的 containment（已做覆盖度校正后）反推 ANI，假设允许 ≤1 mismatch。
+/// 用二分法求解 p_detect_one_mismatch(a, len) = containment。
+pub fn ani_from_containment_one_mismatch(containment: f64, len: usize) -> f64 {
+    let c = containment.clamp(0.0, 1.0);
+    if c <= 0.0 {
+        return 0.0;
+    }
+    if c >= 1.0 {
+        return 1.0;
+    }
+    let mut lo = 0.0;
+    let mut hi = 1.0;
+    for _ in 0..60 {
+        let mid = (lo + hi) / 2.0;
+        let p = p_detect_one_mismatch(mid, len);
+        if p < c {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    ((lo + hi) / 2.0).clamp(0.0, 1.0)
 }
 
 /// Scan `seq_str` for every occurrence — including *overlapping* ones — of
@@ -349,14 +437,13 @@ fn extract_canonical_tags(seq: &[u8], enzyme: &EnzymeSpec) -> Vec<TagHash> {
 /// starts — no separate anchoring or length check is needed.
 fn find_all_tag_positions(seq: &[u8], enzyme: &EnzymeSpec) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
-    for pattern in &enzyme.patterns {
+    for (pattern, &tag_len) in enzyme.patterns.iter().zip(&enzyme.pattern_tag_lengths) {
         let mut start = 0usize;
         while start <= seq.len() {
             match pattern.find_at(seq, start) {
                 Some(m) => {
                     let mstart = m.start();
-                    let mlen = m.end() - mstart;
-                    out.push((mstart, mlen));
+                    out.push((mstart, tag_len));
                     start = mstart + 1; // rewind: mirrors Perl's `pos($seq) = match_start + 1`
                 }
                 None => break,
@@ -370,15 +457,27 @@ fn find_all_tag_positions(seq: &[u8], enzyme: &EnzymeSpec) -> Vec<(usize, usize)
 pub struct SyldbEntry {
     pub sequence_id: String,
     pub tags: Vec<Hash>,
+    /// 每个 tag 的长度（bp），与 `tags` 一一对应。多酶联合 sketch 需要按长度分区估计 ANI。
+    pub tag_lengths: Vec<u8>,
     pub genome_source: String,
     // 新增字段：标记每个tag是否为unique（taxa-specific）
     pub tag_uniqueness: Option<Vec<bool>>,
+    /// 每个 tag 的 canonical 序列字节。用于 error-tolerant matching（≤1 mismatch）。
+    /// 旧版数据库不含此字段，反序列化时为 None，此时只能做 exact matching。
+    #[serde(default)]
+    pub tag_seqs: Option<Vec<TagHash>>,
+    /// 构建该数据库时使用的酶（或酶组合），使 .syldb 文件自描述。
+    /// 旧版数据库不含此字段，反序列化时为空字符串。
+    #[serde(default)]
+    pub enzyme: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SylspEntry {
     pub sequence_id: String,
     pub tag: Hash,
+    /// 该 tag 的长度（bp），用于多酶联合 ANI 的长度分区。
+    pub tag_length: u8,
     pub sample_source: String,
 }
 
@@ -572,7 +671,7 @@ fn process_fasta_sylph_style(
             let tags = extract_canonical_tags(&seq, enzyme);
 
             // 按照sylph的去重模式（现在使用canonical tags）
-            for tag in tags {
+            for (tag, _len) in tags {
                 if kmer_to_tag_table.insert(tag.clone()) {
                     stats.total_tags += 1;
                     write_tags(&mut *writer, &seq_id, &[tag], format)?;
@@ -634,7 +733,7 @@ fn process_fastq_sylph_style(
             let tags = extract_canonical_tags(&seq, enzyme);
 
             // 按照sylph的去重模式（现在使用canonical tags）
-            for tag in tags {
+            for (tag, _len) in tags {
                 if kmer_to_tag_table.insert(tag.clone()) {
                     stats.total_tags += 1;
                     write_tags(&mut *writer, &seq_id, &[tag], format)?;
@@ -814,10 +913,11 @@ fn process_paired_fastq_files(
     // let mut fa_writer = create_writer(&fa_path, false)?;
 
     let mut sylsp_entries = Vec::new();
-    for (id, tag, sample_source) in &fa_entries {
+    for (id, tag, tag_len, sample_source) in &fa_entries {
         let entry = SylspEntry {
             sequence_id: id.clone(),
             tag: *tag,
+            tag_length: *tag_len,
             sample_source: sample_source.clone(),
         };
         sylsp_entries.push(entry);
@@ -829,7 +929,7 @@ fn process_paired_fastq_files(
     // } else {
     //     output_base.with_extension("sylsp")
     // };
-    // 
+    //
     // let sylsp_file = File::create(&sylsp_path)
     //     .context(format!("Failed to create sylsp file: {}", sylsp_path.display()))?;
     // let sylsp_writer = BufWriter::new(sylsp_file);
@@ -920,10 +1020,11 @@ pub fn extract(args: ExtractArgs) -> Result<()> {
                 // let mut fa_writer = create_writer(&fa_path, false)?;
 
                 let mut sylsp_entries = Vec::new();
-                for (id, tag, sample_source) in &fa_entries {
+                for (id, tag, tag_len, sample_source) in &fa_entries {
                     let entry = SylspEntry {
                         sequence_id: id.clone(),
                         tag: *tag,
+                        tag_length: *tag_len,
                         sample_source: sample_source.clone(),
                     };
                     sylsp_entries.push(entry);
@@ -1002,7 +1103,7 @@ pub fn extract(args: ExtractArgs) -> Result<()> {
 
                 let tags = extract_canonical_tags(record.seq(), &enzyme);
 
-                for (i, tag) in tags.iter().enumerate() {
+                for (i, (tag, tag_len)) in tags.iter().enumerate() {
                     let id = format!("{}_tag{}", record.id(), i + 1);
                     writeln!(fa_writer, ">{}\n{}", id, String::from_utf8_lossy(tag))
                         .context("Failed to write FASTA record")?;
@@ -1010,6 +1111,7 @@ pub fn extract(args: ExtractArgs) -> Result<()> {
                     all_sylsp_entries.push(SylspEntry {
                         sequence_id: id,
                         tag: hash_bytes(tag),
+                        tag_length: *tag_len,
                         sample_source: file_stem.clone(),
                     });
                 }
@@ -1195,10 +1297,11 @@ pub fn extract(args: ExtractArgs) -> Result<()> {
                     let tags = extract_tag_hashes(record.seq(), &enzyme);
                     stats.total_tags += tags.len();
 
-                    for (i, tag) in tags.iter().enumerate() {
+                    for (i, (tag, tag_len)) in tags.iter().enumerate() {
                         sylsp_entries.push(SylspEntry {
                             sequence_id: format!("{}_tag{}", record.id(), i + 1),
                             tag: *tag,
+                            tag_length: *tag_len,
                             sample_source: file_stem.clone(), // 用文件名去除扩展名作为样本名
                         });
                     }
@@ -1265,6 +1368,7 @@ fn process_fasta_to_syldb(
     _format: &str,
     _compress: bool,
 ) -> Result<Vec<SyldbEntry>> {
+    let enzyme_name = enzyme.name.clone();
     // 注释掉生成单个.fa文件的代码
     // let fa_path = output_base.with_extension("fa");
     // let mut fa_writer = BufWriter::with_capacity(64 * 1024, File::create(&fa_path)?);
@@ -1281,16 +1385,27 @@ fn process_fasta_to_syldb(
         stats.total_sequences += 1;
         stats.total_sequence_length += seq_len;
 
-        // 直接提取 canonical tag 哈希（syldb 只存哈希，无需保留字节序列）
-        let tags = extract_tag_hashes(record.seq(), enzyme);
-        stats.total_tags += tags.len();
+        // 提取 canonical tag 字节序列及其哈希；保留序列以支持 error-tolerant matching。
+        let tag_items = extract_canonical_tags(record.seq(), enzyme);
+        stats.total_tags += tag_items.len();
+        let mut tags = Vec::with_capacity(tag_items.len());
+        let mut tag_lengths = Vec::with_capacity(tag_items.len());
+        let mut tag_seqs = Vec::with_capacity(tag_items.len());
+        for (tag, tag_len) in tag_items {
+            tags.push(hash_bytes(&tag));
+            tag_lengths.push(tag_len);
+            tag_seqs.push(tag);
+        }
 
         // 创建 syldb 条目
         let entry = SyldbEntry {
             sequence_id: record.id().to_string(),
             tags,
+            tag_lengths,
             genome_source: input.to_string_lossy().to_string(),
             tag_uniqueness: None, // 初始时未标记，将由mark命令处理
+            tag_seqs: Some(tag_seqs),
+            enzyme: enzyme_name.clone(),
         };
         syldb_entries.push(entry);
     }
@@ -1316,7 +1431,7 @@ fn process_paired_fastq_to_sylsp(
     input2: &str,
     enzyme: &EnzymeSpec,
     sample_source: &str,
-) -> Result<Vec<(String, Hash, String)>> {
+) -> Result<Vec<(String, Hash, u8, String)>> {
     let reader1 = fastq::Reader::new(create_reader(Path::new(input1))?);
     let reader2 = fastq::Reader::new(create_reader(Path::new(input2))?);
     let mut stats = ExtractionStats::new();
@@ -1349,11 +1464,11 @@ fn process_paired_fastq_to_sylsp(
         let tags2 = extract_tag_hashes(record2.seq(), enzyme);
         stats.total_tags += tags1.len() + tags2.len();
 
-        for (i, tag) in tags1.iter().enumerate() {
-            entries.push((format!("{}_{}", record1.id(), i + 1), *tag, sample_source.to_string()));
+        for (i, (tag, tag_len)) in tags1.iter().enumerate() {
+            entries.push((format!("{}_{}", record1.id(), i + 1), *tag, *tag_len, sample_source.to_string()));
         }
-        for (i, tag) in tags2.iter().enumerate() {
-            entries.push((format!("{}_{}", record2.id(), i + 1), *tag, sample_source.to_string()));
+        for (i, (tag, tag_len)) in tags2.iter().enumerate() {
+            entries.push((format!("{}_{}", record2.id(), i + 1), *tag, *tag_len, sample_source.to_string()));
         }
     }
 
@@ -1382,3 +1497,66 @@ fn read_file_list(path: &str) -> Result<Vec<String>> {
 }
 
 
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_one_mismatch_canonical_hashes() {
+        // 简单 tag：AAA -> canonical 仍是 AAA（因为 TTT revcomp > AAA）
+        let tag = b"AAA";
+        let hashes = one_mismatch_canonical_hashes(tag);
+        // 3 positions * 3 alts = 9 neighbors
+        assert_eq!(hashes.len(), 9);
+
+        // 所有 neighbor hash 都应该与 exact hash 不同
+        let exact = hash_bytes(tag);
+        assert!(!hashes.contains(&exact));
+
+        // 检查一个特定 neighbor：AAC 的 canonical 是 AAC（GGTTT revcomp > AAC）
+        let expected = hash_bytes(b"AAC");
+        assert!(hashes.contains(&expected));
+    }
+
+    #[test]
+    fn test_canonical_neighbor_consistency() {
+        // 样本中提取到的 tag 是 canonical 形式；reference 的 1-mismatch neighbor 也必须是 canonical 形式才能匹配。
+        // 例：reference tag = "AAACCC"，样本 tag = "AAACCG"（1 mismatch）。
+        // canonical("AAACCG") = "AAACCG"（因为 revcomp = "CGGGTT" > "AAACCG"）。
+        let ref_tag = b"AAACCC";
+        let sample_tag = b"AAACCG";
+        let neighbors = one_mismatch_canonical_hashes(ref_tag);
+        let sample_hash = hash_bytes(sample_tag);
+        assert!(neighbors.contains(&sample_hash));
+    }
+
+    #[test]
+    fn test_p_detect_one_mismatch() {
+        // a=1.0 时必然检出
+        assert!((p_detect_one_mismatch(1.0, 30) - 1.0).abs() < 1e-12);
+        // a=0.0 时只能由 mismatch 检出，但 1 mismatch 也需要至少 ℓ-1 个匹配，所以 a=0 时仍是 0
+        assert!((p_detect_one_mismatch(0.0, 30) - 0.0).abs() < 1e-12);
+        // a=0.95, len=30：应略高于 exact
+        let p_exact = p_detect_exact(0.95, 30);
+        let p_mm = p_detect_one_mismatch(0.95, 30);
+        assert!(p_mm > p_exact);
+    }
+
+    #[test]
+    fn test_ani_from_containment_one_mismatch() {
+        // containment = 1.0 -> ANI = 1.0
+        assert!((ani_from_containment_one_mismatch(1.0, 30) - 1.0).abs() < 1e-12);
+        // containment = 0.0 -> ANI = 0.0
+        assert!((ani_from_containment_one_mismatch(0.0, 30) - 0.0).abs() < 1e-12);
+        // 允许 1 mismatch 时，同样的 containment 对应更低的真实 ANI（因为检出概率更高）
+        let c: f64 = 0.8;
+        let a_exact = c.powf(1.0 / 30.0);
+        let a_mm = ani_from_containment_one_mismatch(c, 30);
+        assert!(a_mm < a_exact, "a_mm={} should be < a_exact={}", a_mm, a_exact);
+        // 自检：p_detect_one_mismatch(a_mm, 30) 应接近 c
+        let recovered = p_detect_one_mismatch(a_mm, 30);
+        assert!((recovered - c).abs() < 1e-6, "recovered={} != c={}", recovered, c);
+    }
+}

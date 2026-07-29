@@ -182,9 +182,9 @@ fn inspect_file(file_path: &str) -> Result<InspectResult> {
     let reader = BufReader::new(file);
 
     match path.extension().and_then(|s| s.to_str()) {
-        Some("db") => inspect_db(reader, file_path),
-        Some("sp") => inspect_sp(reader, file_path),
-        _ => Err(anyhow::anyhow!("Unknown file extension, expected .db or .sp")),
+        Some("db") | Some("syldb") => inspect_db(reader, file_path),
+        Some("sp") | Some("sylsp") => inspect_sp(reader, file_path),
+        _ => Err(anyhow::anyhow!("Unknown file extension, expected .db/.syldb or .sp/.sylsp")),
     }
 }
 
@@ -245,7 +245,16 @@ fn inspect_db(reader: BufReader<File>, file_path: &str) -> Result<InspectResult>
     }
 
     let distribution = calculate_tag_distribution(&tag_lengths);
-    let (enzyme, patterns, _matched_count, _matched_ratio) = ("unknown".to_string(), Vec::new(), 0, 0.0);
+
+    // 自描述数据库：从条目里读取构建时使用的酶；取众数（理论上所有条目相同）。
+    let enzyme = entries.iter()
+        .map(|e| e.enzyme.clone())
+        .filter(|e| !e.is_empty())
+        .max_by_key(|e| entries.iter().filter(|x| x.enzyme == *e).count())
+        .unwrap_or_else(|| "unknown".to_string());
+    let patterns = Vec::new();
+    let _matched_count = 0usize;
+    let _matched_ratio = 0.0;
 
     // 计算tag统计信息
     // 如果有unique标记，使用marked unique count；否则使用distinct tag count
@@ -335,7 +344,11 @@ fn inspect_sp(reader: BufReader<File>, file_path: &str) -> Result<InspectResult>
     }
 
     let distribution = calculate_tag_distribution(&tag_lengths);
-    let (enzyme, patterns, _matched_count, _matched_ratio) = ("unknown".to_string(), Vec::new(), 0, 0.0);
+    // 样本文件 (.sylsp) 不存储酶信息
+    let enzyme = "unknown".to_string();
+    let patterns = Vec::new();
+    let _matched_count = 0usize;
+    let _matched_ratio = 0.0;
 
     // 计算tag统计信息
     let unique_tags = tag_frequency.len();

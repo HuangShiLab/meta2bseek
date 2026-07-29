@@ -201,6 +201,9 @@ pub struct ContainArgs {
     #[clap(short='u', long="estimate-unknown", help_heading = "ALGORITHM", help = "Estimate true coverage and scale sequence abundance in `profile` by estimated unknown sequence percentage" )]
     pub estimate_unknown: bool,
 
+    #[clap(short='m', long="mismatch", default_value_t = 0, help_heading = "ALGORITHM", help = "Maximum Hamming mismatches allowed when matching a reference 2bRAD tag to sample tags (0 or 1). 1 increases sensitivity to sequencing errors/strain variation but requires tag sequences in the database.")]
+    pub mismatch: usize,
+
     
     #[clap(short='I',long="read-seq-id", help_heading = "ALGORITHM", help = "Sequence identity (%) of reads. Only used in -u option and overrides automatic detection. ")]
     pub seq_id: Option<f64>,
@@ -278,6 +281,9 @@ pub struct ProfileArgs {
     
     #[arg(long, default_value_t = 1)]
     pub threads: usize,
+
+    #[arg(long, default_value_t = 0, help_heading = "ALGORITHM", help = "Maximum Hamming mismatches allowed when matching a reference 2bRAD tag to sample tags (0 or 1).")]
+    pub mismatch: usize,
     
     #[arg(long)]
     pub out_file_name: Option<String>,
@@ -293,6 +299,9 @@ pub struct ProfileArgs {
     
     #[arg(long, default_value_t = 10.0, help_heading = "ALGORITHM", help = "Minimum G-score threshold for species filtering. G-score = sqrt(reads_count * tag_count). Default is 10.0")]
     pub gscore_threshold: f64,
+    
+    #[arg(long, default_value_t = 0.0, help_heading = "ALGORITHM", help = "Minimum effective coverage (eff_cov) for a genome to be retained in profile output. Default 0.0 = no filter.")]
+    pub min_eff_coverage: f64,
 }
 
 #[derive(Debug)]

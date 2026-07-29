@@ -9,12 +9,12 @@ use std::sync::Mutex;
 use std::sync::Arc;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use crate::constants::Hash;
+use crate::constants::{Hash, hash_bytes};
 use std::thread;
 use std::time::Duration;
 use memory_stats::memory_stats;
 
-pub use crate::extract::{SyldbEntry, SylspEntry};
+pub use crate::extract::{SyldbEntry, SylspEntry, TagHash, one_mismatch_canonical_hashes, ani_from_containment_one_mismatch};
 
 
 // 内存监控和限制功能 - 采用 sylph 的真正实现
@@ -315,7 +315,8 @@ fn recalculate_with_winner_table(
     winner_map: &FxHashMap<Hash, WinnerTableEntry>,
     interner: &GenomeInterner,
     min_ani: f64,
-    log_reassign: bool
+    log_reassign: bool,
+    mismatch: usize,
 ) -> Vec<QueryResult> {
     eprintln!("Recalculating with winner table for {} database entries and {} sample entries", 
               db_entries.len(), sample_entries.len());
@@ -349,14 +350,20 @@ fn recalculate_with_winner_table(
             let mut tags_lost_count = 0;
 
             // 只统计被 winner table 判给当前基因组的 tag 的覆盖度
-            for tag in &db_entry.tags {
-                if let Some(&c) = sample_counts.get(tag) {
-                    if c == 0 { continue; }
-                    match winner_map.get(tag) {
-                        Some(winner_entry) if Some(winner_entry.genome_idx) != my_idx => {
-                            tags_lost_count += 1; // 该 tag 被分配给了其他基因组
-                        }
-                        _ => covs.push(c), // 归当前基因组所有
+            for (i, tag) in db_entry.tags.iter().enumerate() {
+                let seq = db_entry.tag_seqs.as_ref().and_then(|v| v.get(i));
+                let c = match lookup_tag_coverage(*tag, seq, &sample_counts, mismatch) {
+                    Some(c) if c > 0 => c,
+                    _ => continue,
+                };
+                // winner table 目前基于 exact tag hash 构建；mismatch 命中时若 exact hash 不在 winner_map 中，
+                // 则保守地视为归属于当前基因组（不扣除），避免过度惩罚真实但带 1 mismatch 的 tag。
+                match winner_map.get(tag) {
+                    Some(winner_entry) if Some(winner_entry.genome_idx) != my_idx => {
+                        tags_lost_count += 1; // 该 tag 被分配给了其他基因组
+                    }
+                    _ => {
+                        covs.push(c); // 归当前基因组所有
                     }
                 }
             }
@@ -369,7 +376,7 @@ fn recalculate_with_winner_table(
             }
 
             // 覆盖度校正后的统计
-            let mut result = calculate_statistics(covs, total_sample_tags, total_ref_tags);
+            let mut result = calculate_statistics(covs, &db_entry.tag_lengths, total_sample_tags, total_ref_tags, mismatch);
             result.sample_file = sample_source.clone();
             result.genome_file = genome_id.to_string();
             result.contig_name = db_entry.sequence_id.clone();
@@ -514,6 +521,7 @@ fn recalculate_abundances_after_reassignment(
 const MIN_ANI: f64 = 90.0;                // sylph query 默认 (was 95)
 const PROFILE_MIN_ANI: f64 = 95.0;        // sylph profile 默认 (was 97)
 const MIN_TAGS_FOR_GENOME: usize = 50;    // 基因组最小标签数 (sylph min_number_kmers)
+const MIN_SHARED_TAGS_FOR_PROFILE: usize = 100; // 覆盖度校正后报告一个基因组所需的最小共享 tag 数；防止极低 tag 数下的虚假优势调用
 // 2bRAD tag 长度，用作 containment->ANI 的指数。BcgI=32；理想情况下应随酶/数据库存储。
 const K: f64 = 32.0;
 
@@ -588,6 +596,9 @@ pub fn query(args: ContainArgs) -> Result<()> {
         let db_entries = aggregate_db_by_genome(db_entries);
 
         eprintln!("Found {} genomes in database (after aggregating contigs)", db_entries.len());
+        if let Some(enzyme) = detect_db_enzyme(&db_entries) {
+            eprintln!("Database enzyme: {}", enzyme);
+        }
 
         // 并行处理所有样本文件
         sample_files.par_iter().try_for_each(|sample_path| -> Result<()> {
@@ -614,13 +625,16 @@ pub fn query(args: ContainArgs) -> Result<()> {
 
             // 对每个基因组进行比对
             for db_entry in &db_entries {
-                // 命中 tag 的覆盖度向量
-                let covs: Vec<u32> = db_entry.tags.iter()
-                    .filter_map(|t| sample_counts.get(t).copied().filter(|&c| c > 0))
+                // 命中 tag 的覆盖度向量（支持 ≤1 mismatch）
+                let covs: Vec<u32> = db_entry.tags.iter().enumerate()
+                    .filter_map(|(i, t)| {
+                        let seq = db_entry.tag_seqs.as_ref().and_then(|v| v.get(i));
+                        lookup_tag_coverage(*t, seq, &sample_counts, args.mismatch)
+                    })
                     .collect();
 
                 // 覆盖度校正后的 ANI 统计
-                let mut result = calculate_statistics(covs, total_sample_tags, db_entry.tags.len());
+                let mut result = calculate_statistics(covs, &db_entry.tag_lengths, total_sample_tags, db_entry.tags.len(), args.mismatch);
                 result.sample_file = sample_path.to_string();
                 result.genome_file = db_path.to_string();
                 result.contig_name = db_entry.sequence_id.clone();
@@ -734,17 +748,83 @@ fn empty_result(shared: usize, total_ref_tags: usize, query_tags: usize) -> Quer
     }
 }
 
+/// 多酶联合 ANI：按 tag 长度分区，信息加权最小二乘估计。
+/// `classes` 映射 length -> (N_l, D_l)；`lambda` 为覆盖度校正参数，None 表示不做校正。
+fn joint_ani_from_classes(classes: &FxHashMap<u8, (usize, usize)>, lambda: Option<f64>, mismatch: usize) -> Option<f64> {
+    if mismatch == 0 {
+        // exact matching：c_adj = a^ℓ，对 log 空间做加权最小二乘。
+        let mut num = 0.0;
+        let mut den = 0.0;
+        for (&len, &(n_l, d_l)) in classes {
+            if n_l == 0 || d_l == 0 {
+                continue;
+            }
+            let c = d_l as f64 / n_l as f64;
+            let c_adj = if let Some(lam) = lambda {
+                let p = 1.0 - (-lam).exp();
+                if p <= 0.0 {
+                    continue;
+                }
+                (c / p).min(1.0)
+            } else {
+                c
+            };
+            let l = len as f64;
+            num += n_l as f64 * l * c_adj.ln();
+            den += n_l as f64 * l * l;
+        }
+        if den == 0.0 {
+            return None;
+        }
+        Some((num / den).exp())
+    } else {
+        // ≤1 mismatch：先除以覆盖度校正因子得到 P_detect(a,ℓ)，再逐长度类反解 a，最后加权平均。
+        let mut weighted_a = 0.0;
+        let mut total_weight = 0.0;
+        for (&len, &(n_l, d_l)) in classes {
+            if n_l == 0 || d_l == 0 {
+                continue;
+            }
+            let c = d_l as f64 / n_l as f64;
+            let c_adj = if let Some(lam) = lambda {
+                let p = 1.0 - (-lam).exp();
+                if p <= 0.0 {
+                    continue;
+                }
+                (c / p).min(1.0)
+            } else {
+                c
+            };
+            let a_est = ani_from_containment_one_mismatch(c_adj, len as usize);
+            let weight = n_l as f64 * len as f64;
+            weighted_a += weight * a_est;
+            total_weight += weight;
+        }
+        if total_weight == 0.0 {
+            return None;
+        }
+        Some((weighted_a / total_weight).min(1.0))
+    }
+}
+
 /// 计算单个基因组的朴素 + 覆盖度校正 ANI（sylph get_stats 风格）。
 /// `covs` = 该基因组在样本中命中的 tag 的覆盖度（重数），长度 = 共享 tag 数；
+/// `tag_lengths` = 该基因组每个参考 tag 的长度（与完整 tag 集一一对应）；
+/// `query_tags` = 样本中总 tag 数；
 /// `total_ref_tags` = 该基因组去重后的 tag 总数。
-fn calculate_statistics(mut covs: Vec<u32>, query_tags: usize, total_ref_tags: usize) -> QueryResult {
+fn calculate_statistics(
+    mut covs: Vec<u32>,
+    tag_lengths: &[u8],
+    query_tags: usize,
+    total_ref_tags: usize,
+    mismatch: usize,
+) -> QueryResult {
     let shared = covs.len();
-    if shared == 0 || total_ref_tags == 0 {
+    if shared == 0 || total_ref_tags == 0 || tag_lengths.len() != total_ref_tags {
         return empty_result(shared, total_ref_tags, query_tags);
     }
 
     let containment = shared as f64 / total_ref_tags as f64;
-    let naive_ani = containment.powf(1.0 / K);
 
     covs.sort_unstable();
     let median_cov = covs[covs.len() / 2] as f64;
@@ -754,13 +834,41 @@ fn calculate_statistics(mut covs: Vec<u32>, query_tags: usize, total_ref_tags: u
     let mut full_covs = covs;
     full_covs.extend(std::iter::repeat(0u32).take(total_ref_tags - shared));
 
+    // 按长度统计 (N_l, D_l)
+    let mut length_classes: FxHashMap<u8, (usize, usize)> = FxHashMap::default();
+    for (i, &len) in tag_lengths.iter().enumerate() {
+        let entry = length_classes.entry(len).or_insert((0, 0));
+        entry.0 += 1;
+        if full_covs[i] > 0 {
+            entry.1 += 1;
+        }
+    }
+
+    // 朴素 ANI：不做覆盖度校正
+    let naive_ani = joint_ani_from_classes(&length_classes, None, mismatch)
+        .unwrap_or_else(|| {
+            if mismatch == 1 {
+                // 单长度类时退到主导长度；无长度信息时用 K=32 近似。
+                let dominant_len = length_classes.iter()
+                    .max_by_key(|(_, (n, _))| *n)
+                    .map(|(&l, _)| l as usize)
+                    .unwrap_or(K as usize);
+                ani_from_containment_one_mismatch(containment, dominant_len)
+            } else {
+                containment.powf(1.0 / K)
+            }
+        });
+
     // 是否需要覆盖度校正
     let (adjusted_ani, eff_cov) = if median_cov > MEDIAN_ANI_THRESHOLD {
         // 覆盖足够高，朴素 containment 已能反映一致性
         (naive_ani, median_cov)
     } else {
         match ratio_lambda(&full_covs, MIN_COUNT_CORRECT) {
-            Some(lam) => (ani_from_lambda(lam, K, &full_covs).unwrap_or(naive_ani), lam),
+            Some(lam) => (
+                joint_ani_from_classes(&length_classes, Some(lam), mismatch).unwrap_or(naive_ani),
+                lam,
+            ),
             None => (naive_ani, mean_geq1), // 点数不足，无法估计 lambda：回退到朴素 ANI
         }
     };
@@ -785,6 +893,17 @@ fn calculate_statistics(mut covs: Vec<u32>, query_tags: usize, total_ref_tags: u
 /// 把每条 contig 的 SyldbEntry 按基因组（genome_source 推导出的 id）合并成一个
 /// SyldbEntry，tag 去重。这样 query/profile 都按"整基因组"而非"逐 contig"统计，
 /// 这是降低假阴性最关键的一步。
+/// 从 DB 条目中推断构建时使用的酶（取非空众数）。
+fn detect_db_enzyme(entries: &[SyldbEntry]) -> Option<String> {
+    let mut counts: FxHashMap<String, usize> = FxHashMap::default();
+    for e in entries {
+        if !e.enzyme.is_empty() {
+            *counts.entry(e.enzyme.clone()).or_insert(0) += 1;
+        }
+    }
+    counts.into_iter().max_by_key(|(_, c)| *c).map(|(e, _)| e)
+}
+
 fn aggregate_db_by_genome(entries: Vec<SyldbEntry>) -> Vec<SyldbEntry> {
     let mut map: FxHashMap<String, SyldbEntry> = FxHashMap::default();
     for e in entries {
@@ -792,15 +911,35 @@ fn aggregate_db_by_genome(entries: Vec<SyldbEntry>) -> Vec<SyldbEntry> {
         let agg = map.entry(gid.clone()).or_insert_with(|| SyldbEntry {
             sequence_id: gid.clone(),
             tags: Vec::new(),
+            tag_lengths: Vec::new(),
             genome_source: e.genome_source.clone(),
             tag_uniqueness: None,
+            tag_seqs: Some(Vec::new()),
+            enzyme: e.enzyme.clone(),
         });
         agg.tags.extend(e.tags);
+        agg.tag_lengths.extend(e.tag_lengths);
+        if let (Some(agg_seqs), Some(e_seqs)) = (agg.tag_seqs.as_mut(), e.tag_seqs.as_ref()) {
+            agg_seqs.extend(e_seqs.iter().cloned());
+        }
     }
     let mut out: Vec<SyldbEntry> = map.into_values().collect();
     for e in &mut out {
-        e.tags.sort_unstable();
-        e.tags.dedup();
+        // 按 (hash, length, seq) 去重，保证多酶模式下同一 hash 的不同长度 tag 不被错误合并
+        let n = e.tags.len();
+        let seqs = e.tag_seqs.as_ref().map(|s| s.as_slice());
+        let mut triples: Vec<(Hash, u8, TagHash)> = Vec::with_capacity(n);
+        for i in 0..n {
+            let seq = seqs.map(|s| s.get(i).cloned()).flatten().unwrap_or_default();
+            triples.push((e.tags[i], e.tag_lengths[i], seq));
+        }
+        triples.sort_unstable();
+        triples.dedup();
+        e.tags = triples.iter().map(|(h, _, _)| *h).collect();
+        e.tag_lengths = triples.iter().map(|(_, l, _)| *l).collect();
+        if e.tag_seqs.is_some() {
+            e.tag_seqs = Some(triples.iter().map(|(_, _, s)| s.clone()).collect());
+        }
     }
     out
 }
@@ -823,6 +962,34 @@ fn sample_tag_counts_ref(sample_entries: &[&SylspEntry]) -> FxHashMap<Hash, u32>
     counts
 }
 
+/// 查询一个参考 tag 在样本中的覆盖度。`mismatch=0` 时精确匹配；`mismatch=1` 时额外检查
+/// 该参考 tag 的所有 canonical 1-mismatch 邻居。优先返回 exact match 的计数，若不存在则
+/// 返回第一个命中的 neighbor 计数（避免同一参考 tag 被多个样本 tag 重复计数）。
+fn lookup_tag_coverage(
+    tag_hash: Hash,
+    tag_seq: Option<&TagHash>,
+    sample_counts: &FxHashMap<Hash, u32>,
+    mismatch: usize,
+) -> Option<u32> {
+    if let Some(&c) = sample_counts.get(&tag_hash) {
+        if c > 0 {
+            return Some(c);
+        }
+    }
+    if mismatch == 0 {
+        return None;
+    }
+    let seq = tag_seq?;
+    for neighbor_hash in one_mismatch_canonical_hashes(seq) {
+        if let Some(&c) = sample_counts.get(&neighbor_hash) {
+            if c > 0 {
+                return Some(c);
+            }
+        }
+    }
+    None
+}
+
 fn filter_results(result: &QueryResult, min_ani: Option<f64>) -> bool {
     // 只按 sylph 的方式过滤：有命中、基因组足够大、且（覆盖度校正后的）ANI 达标。
     if result.shared_tags == 0 {
@@ -843,17 +1010,21 @@ fn filter_results_for_profile(result: &QueryResult, min_ani: Option<f64>) -> boo
     if result.ref_tags < MIN_TAGS_FOR_GENOME {
         return false;
     }
+    if result.shared_tags < MIN_SHARED_TAGS_FOR_PROFILE {
+        return false;
+    }
     let effective_min_ani = min_ani.unwrap_or(PROFILE_MIN_ANI);
     result.adjusted_ani >= effective_min_ani
 }
 
 // 内部函数：使用缓存的数据库数据进行查询 - 优化大文件读取
 fn query_single_file_with_cached_db(
-    sample_path: &str, 
-    db_path: &str, 
-    cached_db_entries: &[SyldbEntry], 
+    sample_path: &str,
+    db_path: &str,
+    cached_db_entries: &[SyldbEntry],
     cached_sample_entries: &FxHashMap<String, Vec<SylspEntry>>,
-    min_ani: f64
+    min_ani: f64,
+    mismatch: usize,
 ) -> Result<Vec<QueryResult>> {
     eprintln!("Processing sample file with cached database: {}", sample_path);
     
@@ -897,11 +1068,14 @@ fn query_single_file_with_cached_db(
                     return None;
                 }
 
-                let covs: Vec<u32> = db_entry.tags.iter()
-                    .filter_map(|t| sample_counts.get(t).copied().filter(|&c| c > 0))
+                let covs: Vec<u32> = db_entry.tags.iter().enumerate()
+                    .filter_map(|(i, t)| {
+                        let seq = db_entry.tag_seqs.as_ref().and_then(|v| v.get(i));
+                        lookup_tag_coverage(*t, seq, &sample_counts, mismatch)
+                    })
                     .collect();
 
-                let mut result = calculate_statistics(covs, total_sample_tags, db_entry.tags.len());
+                let mut result = calculate_statistics(covs, &db_entry.tag_lengths, total_sample_tags, db_entry.tags.len(), mismatch);
                 result.sample_file = sample_source.clone();
                 result.genome_file = db_path.to_string();
                 result.contig_name = db_entry.sequence_id.clone();
@@ -924,7 +1098,7 @@ fn query_single_file_with_cached_db(
 }
 
 // 添加新的公共函数用于单个文件的查询（保持原有接口不变）
-pub fn query_single_file(sample_path: &str, db_path: &str, min_ani: f64) -> Result<Vec<QueryResult>> {
+pub fn query_single_file(sample_path: &str, db_path: &str, min_ani: f64, mismatch: usize) -> Result<Vec<QueryResult>> {
     eprintln!("Processing database file: {}", db_path);
     
     // 读取数据库文件
@@ -935,6 +1109,9 @@ pub fn query_single_file(sample_path: &str, db_path: &str, min_ani: f64) -> Resu
         .with_context(|| format!("Failed to deserialize database file: {}", db_path))?;
 
     eprintln!("Found {} entries in database", db_entries.len());
+    if let Some(enzyme) = detect_db_enzyme(&db_entries) {
+        eprintln!("Database enzyme: {}", enzyme);
+    }
 
     // 读取样本文件 - 优化大文件读取
     let sample_file = File::open(sample_path)
@@ -968,11 +1145,14 @@ pub fn query_single_file(sample_path: &str, db_path: &str, min_ani: f64) -> Resu
 
             // 并行处理每个基因组进行比对
             db_entries.par_iter().filter_map(|db_entry| {
-                let covs: Vec<u32> = db_entry.tags.iter()
-                    .filter_map(|t| sample_counts.get(t).copied().filter(|&c| c > 0))
+                let covs: Vec<u32> = db_entry.tags.iter().enumerate()
+                    .filter_map(|(i, t)| {
+                        let seq = db_entry.tag_seqs.as_ref().and_then(|v| v.get(i));
+                        lookup_tag_coverage(*t, seq, &sample_counts, mismatch)
+                    })
                     .collect();
 
-                let mut result = calculate_statistics(covs, total_sample_tags, db_entry.tags.len());
+                let mut result = calculate_statistics(covs, &db_entry.tag_lengths, total_sample_tags, db_entry.tags.len(), mismatch);
                 result.sample_file = sample_source.clone();
                 result.genome_file = db_path.to_string();
                 result.contig_name = db_entry.sequence_id.clone();
@@ -1421,7 +1601,11 @@ fn build_genome_mapping_from_cache(cached_db_entries: &[SyldbEntry]) -> FxHashMa
 pub fn profile(args: ProfileArgs) -> Result<()> {
     // 处理minimum_ani参数：如果没有传入参数，使用默认值
     let effective_min_ani = args.minimum_ani.unwrap_or(PROFILE_MIN_ANI);
+    let min_eff_coverage = args.min_eff_coverage;
     eprintln!("Using minimum ANI threshold: {:.1}%", effective_min_ani);
+    if min_eff_coverage > 0.0 {
+        eprintln!("Using minimum effective coverage threshold: {:.2}", min_eff_coverage);
+    }
     
     // 优化线程池配置 - 采用 sylph 的策略
     let _max_ram = args.threads * 2; // 简单的内存限制，每线程2GB
@@ -1442,6 +1626,9 @@ pub fn profile(args: ProfileArgs) -> Result<()> {
     let cached_db_entries = aggregate_db_by_genome(cached_db_entries);
 
     eprintln!("Cached {} genomes from database (after aggregating contigs)", cached_db_entries.len());
+    if let Some(enzyme) = detect_db_enzyme(&cached_db_entries) {
+        eprintln!("Database enzyme: {}", enzyme);
+    }
 
     // 一次性读取并缓存所有样本文件 - 优化大文件读取
     eprintln!("Loading sample files: {}", args.sample_file);
@@ -1481,7 +1668,7 @@ pub fn profile(args: ProfileArgs) -> Result<()> {
     chunks.into_iter().for_each(|chunk| {
         chunk.into_par_iter().for_each(|sample_file| {
             // 第一阶段：计算初步结果（不使用重新分配）
-            if let Ok(initial_results) = query_single_file_with_cached_db(&sample_file, &args.db_file, &cached_db_entries, &cached_sample_entries, effective_min_ani) {
+            if let Ok(initial_results) = query_single_file_with_cached_db(&sample_file, &args.db_file, &cached_db_entries, &cached_sample_entries, effective_min_ani, args.mismatch) {
                 // 按ANI排序
                 let mut initial_results = initial_results;
                 initial_results.sort_by(|a, b| b.adjusted_ani.partial_cmp(&a.adjusted_ani).unwrap());
@@ -1500,7 +1687,8 @@ pub fn profile(args: ProfileArgs) -> Result<()> {
                         &winner_map,
                         &interner,
                         effective_min_ani,
-                        false
+                        false,
+                        args.mismatch
                     );
                     
                     // 第三阶段：过滤过度重新分配的基因组
@@ -1577,11 +1765,13 @@ pub fn profile(args: ProfileArgs) -> Result<()> {
         // 按ANI排序（参考sylph的排序机制）
         group.sort_by(|a, b| b.adjusted_ani.partial_cmp(&a.adjusted_ani).unwrap());
         
-        // 过滤掉不符合profile要求的genome（依赖覆盖度校正后的 ANI + 基因组大小）
+        // 过滤掉不符合profile要求的genome（依赖覆盖度校正后的 ANI + 基因组大小 + 最小共享 tag 数 + effective coverage）
         group.retain(|r| {
             r.common_tags > 0 &&
+            r.common_tags >= MIN_SHARED_TAGS_FOR_PROFILE &&
             r.adjusted_ani >= effective_min_ani &&
-            r.total_tags >= MIN_TAGS_FOR_GENOME
+            r.total_tags >= MIN_TAGS_FOR_GENOME &&
+            r.eff_cov >= min_eff_coverage
         });
         
         // 计算总覆盖度，包括所有检测到的标签
@@ -1721,4 +1911,86 @@ pub fn profile(args: ProfileArgs) -> Result<()> {
     }
     
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_result(shared: usize, ref_tags: usize, ani: f64) -> QueryResult {
+        QueryResult {
+            sample_file: String::new(),
+            genome_file: String::new(),
+            adjusted_ani: ani,
+            eff_cov: 0.0,
+            ani_percentile: (0.0, 0.0),
+            eff_lambda: 0.0,
+            lambda_percentile: (0.0, 0.0),
+            median_cov: 0.0,
+            mean_cov_geq1: 0.0,
+            containment_ind: String::new(),
+            naive_ani: 0.0,
+            contig_name: String::new(),
+            ref_tags,
+            shared_tags: shared,
+            query_tags: 0,
+            taxonomic_abundance: 0.0,
+            sequence_abundance: 0.0,
+        }
+    }
+
+    #[test]
+    fn test_min_shared_tag_guard() {
+        // A result with enough shared tags and high enough ANI should pass.
+        let ok_result = dummy_result(MIN_SHARED_TAGS_FOR_PROFILE, MIN_TAGS_FOR_GENOME, PROFILE_MIN_ANI + 1.0);
+        assert!(filter_results_for_profile(&ok_result, None));
+
+        // A result with too few shared tags should be filtered out, even if ANI is high.
+        let low_tag_result = dummy_result(MIN_SHARED_TAGS_FOR_PROFILE - 1, MIN_TAGS_FOR_GENOME, PROFILE_MIN_ANI + 1.0);
+        assert!(!filter_results_for_profile(&low_tag_result, None));
+
+        // A result with zero shared tags should always be filtered out.
+        let zero_result = dummy_result(0, MIN_TAGS_FOR_GENOME, PROFILE_MIN_ANI + 1.0);
+        assert!(!filter_results_for_profile(&zero_result, None));
+    }
+
+    #[test]
+    fn test_lookup_tag_coverage_exact_and_mismatch() {
+        let mut sample_counts: FxHashMap<Hash, u32> = FxHashMap::default();
+        let ref_seq = b"AAACCC";
+        let exact_hash = hash_bytes(ref_seq);
+        let neighbor_seq = b"AAACCG"; // 1 mismatch
+        let neighbor_hash = hash_bytes(neighbor_seq);
+
+        sample_counts.insert(exact_hash, 5);
+        sample_counts.insert(neighbor_hash, 3);
+
+        // exact mode：只命中 exact
+        assert_eq!(lookup_tag_coverage(exact_hash, Some(&ref_seq.to_vec()), &sample_counts, 0), Some(5));
+        // mismatch mode：优先 exact（5 > 3）
+        assert_eq!(lookup_tag_coverage(exact_hash, Some(&ref_seq.to_vec()), &sample_counts, 1), Some(5));
+
+        // 把 exact 计数设为 0，mismatch mode 应命中 neighbor
+        sample_counts.insert(exact_hash, 0);
+        assert_eq!(lookup_tag_coverage(exact_hash, Some(&ref_seq.to_vec()), &sample_counts, 1), Some(3));
+
+        // 无 tag_seqs 时 mismatch mode 无法生成邻居，只能 exact match
+        assert_eq!(lookup_tag_coverage(exact_hash, None, &sample_counts, 1), None);
+    }
+
+    #[test]
+    fn test_calculate_statistics_mismatch_increases_shared() {
+        // 构造 100 个长度 32 的参考 tag，其中 70 个在样本中被观察到。
+        // 在 mismatch 模型下，同样的 observed fraction 对应更低的真实 ANI。
+        let total_ref = 100usize;
+        let covs = vec![1u32; 70];
+        let tag_lengths = vec![32u8; total_ref];
+
+        let exact_result = calculate_statistics(covs.clone(), &tag_lengths, 1000, total_ref, 0);
+        let mm_result = calculate_statistics(covs, &tag_lengths, 1000, total_ref, 1);
+
+        assert_eq!(exact_result.shared_tags, mm_result.shared_tags);
+        assert!(exact_result.adjusted_ani > mm_result.adjusted_ani,
+            "exact ANI {} should be > mismatch ANI {}", exact_result.adjusted_ani, mm_result.adjusted_ani);
+    }
 }

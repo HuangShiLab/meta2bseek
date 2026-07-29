@@ -188,14 +188,20 @@ mod tests {
             SyldbEntry {
                 sequence_id: "seq1".to_string(),
                 tags: vec![hash_bytes(b"ATGC"), hash_bytes(b"CGTA")],
+                tag_lengths: vec![4, 4],
                 genome_source: "genome_a.fa".to_string(),
                 tag_uniqueness: None,
+                tag_seqs: None,
+                enzyme: "BcgI".to_string(),
             },
             SyldbEntry {
                 sequence_id: "seq2".to_string(),
                 tags: vec![hash_bytes(b"ATGC"), hash_bytes(b"TTTT")],
+                tag_lengths: vec![4, 4],
                 genome_source: "genome_b.fa".to_string(),
                 tag_uniqueness: None,
+                tag_seqs: None,
+                enzyme: "BcgI".to_string(),
             },
         ];
         
