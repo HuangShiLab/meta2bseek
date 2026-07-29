@@ -2,7 +2,7 @@ use clap::{Args, Parser, Subcommand};
 // pub(crate) use crate::constants::*;
 
 #[derive(Parser)]
-#[clap(author, version, about = "Ultrafast genome ANI queries and taxonomic profiling for metagenomic shotgun samples.\n\n--- Preparing inputs by extracting (indexing) 2bRAD tags\n## fastq (reads) and fasta (genomes all at once)\n## *.sp found in -d; *.db given by -o\nmeta2bseek extract -t 5 sample1.fq sample2.fq genome1.fa genome2.fa -o genome1+genome2 -d sample_dir\n\n## paired-end reads\nmeta2bseek extract -1 a_1.fq b_1.fq -2 b_2.fq b_2.fq -d paired_extracts\n\n## batch process reads from a list file\nmeta2bseek extract -s reads_list.txt -d batch_output --out-name batch_process\n\n--- Nearest neighbour containment ANI\nmeta2bseek query *.db *.sp > all-to-all-query.tsv\n\n--- Taxonomic profiling with relative abundances and ANI\nmeta2bseek profile *.db *.sp > all-to-all-profile.tsv", arg_required_else_help = true, disable_help_subcommand = true)]
+#[clap(author, version, about = "Coverage-adjusted ANI queries and taxonomic profiling for 2bRAD and shotgun metagenomic data.\n\n--- Preparing inputs by extracting (indexing) 2bRAD tags\n## genomes and reads together; outputs <name>.syldb / <name>.sylsp in the -d directory\nmeta2bseek extract -t 5 -g genome1.fa genome2.fa -r sample1.fq -o out -d out -n run1 -e BcgI\n\n## multi-enzyme\nmeta2bseek extract -t 5 -g genome1.fa -r sample1.fq -o out -d out -n run1 -e BcgI,BslFI,CspCI,AloI\n\n--- Nearest neighbour coverage-adjusted ANI\nmeta2bseek query --db-file out/run1.syldb --sample-file out/run1.sylsp > query.tsv\n\n--- Taxonomic profiling with relative abundances and ANI\nmeta2bseek profile --db-file out/run1.syldb --sample-file out/run1.sylsp --minimum-ani 90 --tsv-name abund.tsv --threads 5 > profile.tsv", arg_required_else_help = true, disable_help_subcommand = true)]
 pub struct Cli {
     #[clap(subcommand,)]
     pub mode: Mode,
@@ -10,7 +10,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Mode {
-    /// extract sequences into samples (reads) and databases (genomes). Each sample.fq -> sample.sp. All *.fa -> *.db. 
+    /// extract 2bRAD tags from genomes and reads. Genome set -> <name>.syldb; each sample -> <name>.sylsp. 
     #[clap(display_order = 1)]
     Extract(ExtractArgs),
     /// sketch sequences using k-mer sampling (similar to sylph). Each sample.fq -> sample.sp. All *.fa -> *.db.
@@ -201,7 +201,7 @@ pub struct ContainArgs {
     #[clap(short='u', long="estimate-unknown", help_heading = "ALGORITHM", help = "Estimate true coverage and scale sequence abundance in `profile` by estimated unknown sequence percentage" )]
     pub estimate_unknown: bool,
 
-    #[clap(short='m', long="mismatch", default_value_t = 0, help_heading = "ALGORITHM", help = "Maximum Hamming mismatches allowed when matching a reference 2bRAD tag to sample tags (0 or 1). 1 increases sensitivity to sequencing errors/strain variation but requires tag sequences in the database.")]
+    #[clap(long="mismatch", default_value_t = 0, help_heading = "ALGORITHM", help = "Maximum Hamming mismatches allowed when matching a reference 2bRAD tag to sample tags (0 or 1). 1 increases sensitivity to sequencing errors/strain variation but requires tag sequences in the database.")]
     pub mismatch: usize,
 
     
