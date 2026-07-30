@@ -19,6 +19,7 @@ mod constants;
 mod inspect;
 mod view;
 mod mark;
+mod merge;
 
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc; //use std::panic::set_hook;
@@ -33,6 +34,7 @@ fn main() -> Result<()> {
         cmdline::Mode::View(view_args) => view::view(view_args),
         cmdline::Mode::Query(contain_args) => contain::query(contain_args),
         cmdline::Mode::Profile(profile_args) => contain::profile(profile_args),
-        cmdline::Mode::Mark(mark_args) => mark::mark(mark_args)
+        cmdline::Mode::Mark(mark_args) => mark::mark(mark_args),
+        cmdline::Mode::Merge(merge_args) => merge::merge(merge_args)
     }
 }

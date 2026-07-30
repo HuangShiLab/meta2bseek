@@ -31,6 +31,9 @@ pub enum Mode {
     ///Mark unique (taxa-specific) tags in .db files.
     #[clap(arg_required_else_help = true, display_order = 7)]
     Mark(MarkArgs),
+    ///Merge multiple .syldb database files into one .syldb (e.g. per-chunk batch builds).
+    #[clap(arg_required_else_help = true, display_order = 8)]
+    Merge(MergeArgs),
 }
 
 
@@ -326,6 +329,15 @@ pub struct ViewArgs {
     pub log_path: Option<String>,
     #[clap(long="tsv-name", default_value = "kmer_matrix.tsv", help = "Name of the TSV file for k-mer count matrix")]
     pub tsv_name: String,
+}
+
+#[derive(Args)]
+pub struct MergeArgs {
+    #[clap(num_args=1.., required = true, help = "Input .syldb files to merge (must be built with the same enzyme set)")]
+    pub inputs: Vec<String>,
+
+    #[clap(short='o', long="output", required = true, help_heading = "OUTPUT", help = "Output merged .syldb file")]
+    pub output: String,
 }
 
 #[derive(Args)]
