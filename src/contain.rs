@@ -599,6 +599,7 @@ pub fn query(args: ContainArgs) -> Result<()> {
         if let Some(enzyme) = detect_db_enzyme(&db_entries) {
             eprintln!("Database enzyme: {}", enzyme);
         }
+        ensure_tag_seqs_for_mismatch(&db_entries, args.mismatch)?;
 
         // 并行处理所有样本文件
         sample_files.par_iter().try_for_each(|sample_path| -> Result<()> {
@@ -904,6 +905,17 @@ fn detect_db_enzyme(entries: &[SyldbEntry]) -> Option<String> {
     counts.into_iter().max_by_key(|(_, c)| *c).map(|(e, _)| e)
 }
 
+/// mismatch 模式需要数据库中存储的 tag 序列来生成 1-mismatch 邻居；
+/// 用 --no-tag-seqs 构建的（或更旧版本的）数据库不含序列，应明确报错而非静默退化为 exact match。
+fn ensure_tag_seqs_for_mismatch(entries: &[SyldbEntry], mismatch: usize) -> Result<()> {
+    if mismatch > 0 && entries.iter().any(|e| e.tag_seqs.is_none()) {
+        return Err(anyhow!(
+            "mismatch mode requires a database built with tag sequences; this database was built with --no-tag-seqs (or predates tag sequence storage). Rebuild the database without --no-tag-seqs or use --mismatch 0"
+        ));
+    }
+    Ok(())
+}
+
 fn aggregate_db_by_genome(entries: Vec<SyldbEntry>) -> Vec<SyldbEntry> {
     let mut map: FxHashMap<String, SyldbEntry> = FxHashMap::default();
     for e in entries {
@@ -914,13 +926,13 @@ fn aggregate_db_by_genome(entries: Vec<SyldbEntry>) -> Vec<SyldbEntry> {
             tag_lengths: Vec::new(),
             genome_source: e.genome_source.clone(),
             tag_uniqueness: None,
-            tag_seqs: Some(Vec::new()),
+            tag_seqs: None,
             enzyme: e.enzyme.clone(),
         });
         agg.tags.extend(e.tags);
         agg.tag_lengths.extend(e.tag_lengths);
-        if let (Some(agg_seqs), Some(e_seqs)) = (agg.tag_seqs.as_mut(), e.tag_seqs.as_ref()) {
-            agg_seqs.extend(e_seqs.iter().cloned());
+        if let Some(e_seqs) = e.tag_seqs.as_ref() {
+            agg.tag_seqs.get_or_insert_with(Vec::new).extend(e_seqs.iter().cloned());
         }
     }
     let mut out: Vec<SyldbEntry> = map.into_values().collect();
@@ -1629,6 +1641,7 @@ pub fn profile(args: ProfileArgs) -> Result<()> {
     if let Some(enzyme) = detect_db_enzyme(&cached_db_entries) {
         eprintln!("Database enzyme: {}", enzyme);
     }
+    ensure_tag_seqs_for_mismatch(&cached_db_entries, args.mismatch)?;
 
     // 一次性读取并缓存所有样本文件 - 优化大文件读取
     eprintln!("Loading sample files: {}", args.sample_file);

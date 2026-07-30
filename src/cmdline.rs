@@ -86,6 +86,9 @@ pub struct ExtractArgs {
 
     #[clap(long="max-ram", help_heading = "MEMORY", help = "Maximum RAM usage in GB (default: 16)")]
     pub max_ram: Option<usize>,
+
+    #[clap(long="no-tag-seqs", help_heading = "ALGORITHM", help = "Do not store tag sequences in the .syldb (saves ~4-5x memory/disk for large databases; --mismatch 1 will be unavailable)")]
+    pub no_tag_seqs: bool,
 }
 
 #[derive(Args, Default)]

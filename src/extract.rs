@@ -1162,6 +1162,7 @@ pub fn extract(args: ExtractArgs) -> Result<()> {
                     &enzyme,
                     &args.format,
                     file.ends_with(".gz"),
+                    !args.no_tag_seqs,
                 )
             })
             .collect();
@@ -1218,6 +1219,7 @@ pub fn extract(args: ExtractArgs) -> Result<()> {
                     &enzyme,
                     &args.format,
                     file.ends_with(".gz"),
+                    !args.no_tag_seqs,
                 )
             })
             .collect();
@@ -1367,6 +1369,7 @@ fn process_fasta_to_syldb(
     enzyme: &EnzymeSpec,
     _format: &str,
     _compress: bool,
+    store_tag_seqs: bool,
 ) -> Result<Vec<SyldbEntry>> {
     let enzyme_name = enzyme.name.clone();
     // 注释掉生成单个.fa文件的代码
@@ -1390,11 +1393,17 @@ fn process_fasta_to_syldb(
         stats.total_tags += tag_items.len();
         let mut tags = Vec::with_capacity(tag_items.len());
         let mut tag_lengths = Vec::with_capacity(tag_items.len());
-        let mut tag_seqs = Vec::with_capacity(tag_items.len());
+        let mut tag_seqs = if store_tag_seqs {
+            Some(Vec::with_capacity(tag_items.len()))
+        } else {
+            None
+        };
         for (tag, tag_len) in tag_items {
             tags.push(hash_bytes(&tag));
             tag_lengths.push(tag_len);
-            tag_seqs.push(tag);
+            if let Some(seqs) = tag_seqs.as_mut() {
+                seqs.push(tag);
+            }
         }
 
         // 创建 syldb 条目
@@ -1404,7 +1413,7 @@ fn process_fasta_to_syldb(
             tag_lengths,
             genome_source: input.to_string_lossy().to_string(),
             tag_uniqueness: None, // 初始时未标记，将由mark命令处理
-            tag_seqs: Some(tag_seqs),
+            tag_seqs,
             enzyme: enzyme_name.clone(),
         };
         syldb_entries.push(entry);
@@ -1502,6 +1511,28 @@ fn read_file_list(path: &str) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_process_fasta_to_syldb_tag_seqs_optional() {
+        let dir = std::env::temp_dir();
+        let fa_path = dir.join("sylph_test_tag_seqs_optional.fa");
+        std::fs::write(&fa_path, ">seq1\nACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT\n").unwrap();
+        let out_base = dir.join("sylph_test_tag_seqs_optional");
+        let enzyme = EnzymeSpec::new("BcgI").unwrap();
+
+        let with_seqs = process_fasta_to_syldb(&fa_path, &out_base, &enzyme, "fa", false, true).unwrap();
+        assert_eq!(with_seqs.len(), 1);
+        assert!(with_seqs[0].tag_seqs.is_some());
+
+        let without_seqs = process_fasta_to_syldb(&fa_path, &out_base, &enzyme, "fa", false, false).unwrap();
+        assert_eq!(without_seqs.len(), 1);
+        assert!(without_seqs[0].tag_seqs.is_none());
+        // 哈希与长度不受 flag 影响
+        assert_eq!(with_seqs[0].tags, without_seqs[0].tags);
+        assert_eq!(with_seqs[0].tag_lengths, without_seqs[0].tag_lengths);
+
+        std::fs::remove_file(&fa_path).ok();
+    }
 
     #[test]
     fn test_one_mismatch_canonical_hashes() {

@@ -96,6 +96,11 @@ meta2bseek extract -t 8 -k genome_list.txt -s reads_list.txt -o out -d out -n ba
 line; `-s/--sample-list` is one fastq path per line. Use `--l1`/`--l2` for paired list
 files.
 
+Useful `extract` options:
+
+- `--no-tag-seqs`: do not store tag sequences in the `.syldb` (saves ~4-5x memory/disk
+  for large databases; `--mismatch 1` will be unavailable for that database).
+
 ## Subcommands
 
 | Subcommand | Purpose |
