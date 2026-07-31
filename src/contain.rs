@@ -317,6 +317,7 @@ fn recalculate_with_winner_table(
     min_ani: f64,
     log_reassign: bool,
     mismatch: usize,
+    min_shared_tags: usize,
 ) -> Vec<QueryResult> {
     eprintln!("Recalculating with winner table for {} database entries and {} sample entries", 
               db_entries.len(), sample_entries.len());
@@ -382,7 +383,7 @@ fn recalculate_with_winner_table(
             result.contig_name = db_entry.sequence_id.clone();
 
             // 应用profile专用的过滤条件
-            if filter_results_for_profile(&result, Some(min_ani)) {
+            if filter_results_for_profile(&result, Some(min_ani), min_shared_tags) {
                 all_results.push(result);
             }
         }
@@ -521,7 +522,7 @@ fn recalculate_abundances_after_reassignment(
 const MIN_ANI: f64 = 90.0;                // sylph query 默认 (was 95)
 const PROFILE_MIN_ANI: f64 = 95.0;        // sylph profile 默认 (was 97)
 const MIN_TAGS_FOR_GENOME: usize = 50;    // 基因组最小标签数 (sylph min_number_kmers)
-const MIN_SHARED_TAGS_FOR_PROFILE: usize = 100; // 覆盖度校正后报告一个基因组所需的最小共享 tag 数；防止极低 tag 数下的虚假优势调用
+pub const MIN_SHARED_TAGS_FOR_PROFILE: usize = 100; // 覆盖度校正后报告一个基因组所需的最小共享 tag 数；防止极低 tag 数下的虚假优势调用
 // 2bRAD tag 长度，用作 containment->ANI 的指数。BcgI=32；理想情况下应随酶/数据库存储。
 const K: f64 = 32.0;
 
@@ -1015,14 +1016,14 @@ fn filter_results(result: &QueryResult, min_ani: Option<f64>) -> bool {
 }
 
 // profile 专用过滤（阈值更严，但同样依赖覆盖度校正后的 ANI）
-fn filter_results_for_profile(result: &QueryResult, min_ani: Option<f64>) -> bool {
+fn filter_results_for_profile(result: &QueryResult, min_ani: Option<f64>, min_shared_tags: usize) -> bool {
     if result.shared_tags == 0 {
         return false;
     }
     if result.ref_tags < MIN_TAGS_FOR_GENOME {
         return false;
     }
-    if result.shared_tags < MIN_SHARED_TAGS_FOR_PROFILE {
+    if result.shared_tags < min_shared_tags {
         return false;
     }
     let effective_min_ani = min_ani.unwrap_or(PROFILE_MIN_ANI);
@@ -1037,6 +1038,7 @@ fn query_single_file_with_cached_db(
     cached_sample_entries: &FxHashMap<String, Vec<SylspEntry>>,
     min_ani: f64,
     mismatch: usize,
+    min_shared_tags: usize,
 ) -> Result<Vec<QueryResult>> {
     eprintln!("Processing sample file with cached database: {}", sample_path);
     
@@ -1093,7 +1095,7 @@ fn query_single_file_with_cached_db(
                 result.contig_name = db_entry.sequence_id.clone();
 
                 // 应用profile专用的过滤条件
-                if filter_results_for_profile(&result, Some(min_ani)) {
+                if filter_results_for_profile(&result, Some(min_ani), min_shared_tags) {
                     Some(result)
                 } else {
                     None
@@ -1614,7 +1616,9 @@ pub fn profile(args: ProfileArgs) -> Result<()> {
     // 处理minimum_ani参数：如果没有传入参数，使用默认值
     let effective_min_ani = args.minimum_ani.unwrap_or(PROFILE_MIN_ANI);
     let min_eff_coverage = args.min_eff_coverage;
+    let min_shared_tags = args.min_shared_tags;
     eprintln!("Using minimum ANI threshold: {:.1}%", effective_min_ani);
+    eprintln!("Using minimum shared tags threshold: {}", min_shared_tags);
     if min_eff_coverage > 0.0 {
         eprintln!("Using minimum effective coverage threshold: {:.2}", min_eff_coverage);
     }
@@ -1681,7 +1685,7 @@ pub fn profile(args: ProfileArgs) -> Result<()> {
     chunks.into_iter().for_each(|chunk| {
         chunk.into_par_iter().for_each(|sample_file| {
             // 第一阶段：计算初步结果（不使用重新分配）
-            if let Ok(initial_results) = query_single_file_with_cached_db(&sample_file, &args.db_file, &cached_db_entries, &cached_sample_entries, effective_min_ani, args.mismatch) {
+            if let Ok(initial_results) = query_single_file_with_cached_db(&sample_file, &args.db_file, &cached_db_entries, &cached_sample_entries, effective_min_ani, args.mismatch, min_shared_tags) {
                 // 按ANI排序
                 let mut initial_results = initial_results;
                 initial_results.sort_by(|a, b| b.adjusted_ani.partial_cmp(&a.adjusted_ani).unwrap());
@@ -1701,7 +1705,8 @@ pub fn profile(args: ProfileArgs) -> Result<()> {
                         &interner,
                         effective_min_ani,
                         false,
-                        args.mismatch
+                        args.mismatch,
+                        min_shared_tags
                     );
                     
                     // 第三阶段：过滤过度重新分配的基因组
@@ -1781,7 +1786,7 @@ pub fn profile(args: ProfileArgs) -> Result<()> {
         // 过滤掉不符合profile要求的genome（依赖覆盖度校正后的 ANI + 基因组大小 + 最小共享 tag 数 + effective coverage）
         group.retain(|r| {
             r.common_tags > 0 &&
-            r.common_tags >= MIN_SHARED_TAGS_FOR_PROFILE &&
+            r.common_tags >= min_shared_tags &&
             r.adjusted_ani >= effective_min_ani &&
             r.total_tags >= MIN_TAGS_FOR_GENOME &&
             r.eff_cov >= min_eff_coverage
@@ -1956,15 +1961,18 @@ mod tests {
     fn test_min_shared_tag_guard() {
         // A result with enough shared tags and high enough ANI should pass.
         let ok_result = dummy_result(MIN_SHARED_TAGS_FOR_PROFILE, MIN_TAGS_FOR_GENOME, PROFILE_MIN_ANI + 1.0);
-        assert!(filter_results_for_profile(&ok_result, None));
+        assert!(filter_results_for_profile(&ok_result, None, MIN_SHARED_TAGS_FOR_PROFILE));
 
         // A result with too few shared tags should be filtered out, even if ANI is high.
         let low_tag_result = dummy_result(MIN_SHARED_TAGS_FOR_PROFILE - 1, MIN_TAGS_FOR_GENOME, PROFILE_MIN_ANI + 1.0);
-        assert!(!filter_results_for_profile(&low_tag_result, None));
+        assert!(!filter_results_for_profile(&low_tag_result, None, MIN_SHARED_TAGS_FOR_PROFILE));
+
+        // Lowering the threshold should admit the same low-tag result.
+        assert!(filter_results_for_profile(&low_tag_result, None, 1));
 
         // A result with zero shared tags should always be filtered out.
         let zero_result = dummy_result(0, MIN_TAGS_FOR_GENOME, PROFILE_MIN_ANI + 1.0);
-        assert!(!filter_results_for_profile(&zero_result, None));
+        assert!(!filter_results_for_profile(&zero_result, None, 1));
     }
 
     #[test]

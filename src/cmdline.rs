@@ -308,6 +308,9 @@ pub struct ProfileArgs {
     
     #[arg(long, default_value_t = 0.0, help_heading = "ALGORITHM", help = "Minimum effective coverage (eff_cov) for a genome to be retained in profile output. Default 0.0 = no filter.")]
     pub min_eff_coverage: f64,
+
+    #[arg(long, default_value_t = crate::contain::MIN_SHARED_TAGS_FOR_PROFILE, help_heading = "ALGORITHM", help = "Minimum shared tags required to report a genome in profile (default 100; lower values increase sensitivity on large dense databases)")]
+    pub min_shared_tags: usize,
 }
 
 #[derive(Debug)]

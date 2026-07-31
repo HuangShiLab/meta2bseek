@@ -129,6 +129,8 @@ Run `meta2bseek <subcommand> -h` for the full option list.
   filtering (default 10).
 - `--min-eff-coverage <F>`: minimum effective coverage to retain a genome (default 0 =
   no filter).
+- `--min-shared-tags <N>`: minimum shared tags required to report a genome (default 100;
+  lower values increase sensitivity on large dense databases).
 
 `query` takes pre-extracted files as positional arguments
 (`meta2bseek query *.syldb *.sylsp > results.tsv`) and shares most algorithm options;
