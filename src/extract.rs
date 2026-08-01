@@ -413,6 +413,24 @@ pub fn ani_from_containment_one_mismatch(containment: f64, len: usize) -> f64 {
     ((lo + hi) / 2.0).clamp(0.0, 1.0)
 }
 
+/// Error-aware variant of `ani_from_containment_one_mismatch`.
+///
+/// Model: sample reads carry a per-base sequencing error rate `e`, so a homologous
+/// tag from a genome with true per-base identity `a` is observed with per-base match
+/// probability `q = a·(1-e)`, not `a`. The observed (coverage-corrected) containment
+/// therefore satisfies `C = P(≤1 mismatch | q) = q^ℓ + ℓ·q^{ℓ-1}·(1-q)`.
+/// Inversion: solve for `q` with the existing bisection (identical formula), then
+/// recover `a = q / (1-e)`, clamped to ≤ 1. With `e = 0` this reduces exactly to
+/// `ani_from_containment_one_mismatch`.
+pub fn ani_from_containment_one_mismatch_err(containment: f64, len: usize, e: f64) -> f64 {
+    let q = ani_from_containment_one_mismatch(containment, len);
+    let denom = 1.0 - e;
+    if denom <= 0.0 {
+        return q; // 非法的 e：不做校正，避免除零/放大
+    }
+    (q / denom).clamp(0.0, 1.0)
+}
+
 /// Scan `seq_str` for every occurrence — including *overlapping* ones — of
 /// any of `enzyme`'s recognition patterns, and return `(start, length)` for
 /// each hit.

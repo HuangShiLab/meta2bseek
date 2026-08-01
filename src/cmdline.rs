@@ -212,6 +212,12 @@ pub struct ContainArgs {
     #[clap(long="mismatch", default_value_t = 0, help_heading = "ALGORITHM", help = "Maximum Hamming mismatches allowed when matching a reference 2bRAD tag to sample tags (0 or 1). 1 increases sensitivity to sequencing errors/strain variation but requires tag sequences in the database.")]
     pub mismatch: usize,
 
+    #[clap(long="read-error-rate", help_heading = "ALGORITHM", help = "Fixed per-base read error rate used for error-aware ANI inversion in --mismatch 1 mode. Overrides automatic estimation from top candidate genomes.")]
+    pub read_error_rate: Option<f64>,
+
+    #[clap(long="no-error-correction", help_heading = "ALGORITHM", help = "Disable error-aware ANI inversion in --mismatch 1 mode (restores the old divergence-only inversion).")]
+    pub no_error_correction: bool,
+
     
     #[clap(short='I',long="read-seq-id", help_heading = "ALGORITHM", help = "Sequence identity (%) of reads. Only used in -u option and overrides automatic detection. ")]
     pub seq_id: Option<f64>,
@@ -292,6 +298,12 @@ pub struct ProfileArgs {
 
     #[arg(long, default_value_t = 0, help_heading = "ALGORITHM", help = "Maximum Hamming mismatches allowed when matching a reference 2bRAD tag to sample tags (0 or 1).")]
     pub mismatch: usize,
+
+    #[arg(long, help_heading = "ALGORITHM", help = "Fixed per-base read error rate used for error-aware ANI inversion in --mismatch 1 mode. Overrides automatic estimation from top candidate genomes.")]
+    pub read_error_rate: Option<f64>,
+
+    #[arg(long, help_heading = "ALGORITHM", help = "Disable error-aware ANI inversion in --mismatch 1 mode (restores the old divergence-only inversion).")]
+    pub no_error_correction: bool,
     
     #[arg(long)]
     pub out_file_name: Option<String>,

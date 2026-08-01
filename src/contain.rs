@@ -14,7 +14,7 @@ use std::thread;
 use std::time::Duration;
 use memory_stats::memory_stats;
 
-pub use crate::extract::{SyldbEntry, SylspEntry, TagHash, one_mismatch_canonical_hashes, ani_from_containment_one_mismatch};
+pub use crate::extract::{SyldbEntry, SylspEntry, TagHash, one_mismatch_canonical_hashes, ani_from_containment_one_mismatch, ani_from_containment_one_mismatch_err};
 
 
 // 内存监控和限制功能 - 采用 sylph 的真正实现
@@ -319,6 +319,8 @@ fn recalculate_with_winner_table(
     mismatch: usize,
     min_shared_tags: usize,
     min_tags_genome: usize,
+    read_error_rate: Option<f64>,
+    no_error_correction: bool,
 ) -> Vec<QueryResult> {
     eprintln!("Recalculating with winner table for {} database entries and {} sample entries", 
               db_entries.len(), sample_entries.len());
@@ -337,6 +339,7 @@ fn recalculate_with_winner_table(
     for (sample_source, group_entries) in sample_groups {
         let sample_counts = sample_tag_counts_ref(&group_entries);
         let total_sample_tags = group_entries.len();
+        let error_rate = sample_error_rate(db_entries, &sample_counts, mismatch, read_error_rate, no_error_correction);
 
         // 为每个基因组（已聚合）计算重新分配后的结果
         for db_entry in db_entries {
@@ -378,7 +381,7 @@ fn recalculate_with_winner_table(
             }
 
             // 覆盖度校正后的统计
-            let mut result = calculate_statistics(covs, &db_entry.tag_lengths, total_sample_tags, total_ref_tags, mismatch);
+            let mut result = calculate_statistics(covs, &db_entry.tag_lengths, total_sample_tags, total_ref_tags, mismatch, error_rate);
             result.sample_file = sample_source.clone();
             result.genome_file = genome_id.to_string();
             result.contig_name = db_entry.sequence_id.clone();
@@ -625,6 +628,7 @@ pub fn query(args: ContainArgs) -> Result<()> {
             let sample_counts = sample_tag_counts(&sample_entries);
             let total_sample_tags = sample_entries.len();
             eprintln!("Total tags in sample: {}", total_sample_tags);
+            let error_rate = sample_error_rate(&db_entries, &sample_counts, args.mismatch, args.read_error_rate, args.no_error_correction);
 
             // 对每个基因组进行比对
             for db_entry in &db_entries {
@@ -637,7 +641,7 @@ pub fn query(args: ContainArgs) -> Result<()> {
                     .collect();
 
                 // 覆盖度校正后的 ANI 统计
-                let mut result = calculate_statistics(covs, &db_entry.tag_lengths, total_sample_tags, db_entry.tags.len(), args.mismatch);
+                let mut result = calculate_statistics(covs, &db_entry.tag_lengths, total_sample_tags, db_entry.tags.len(), args.mismatch, error_rate);
                 result.sample_file = sample_path.to_string();
                 result.genome_file = db_path.to_string();
                 result.contig_name = db_entry.sequence_id.clone();
@@ -753,7 +757,8 @@ fn empty_result(shared: usize, total_ref_tags: usize, query_tags: usize) -> Quer
 
 /// 多酶联合 ANI：按 tag 长度分区，信息加权最小二乘估计。
 /// `classes` 映射 length -> (N_l, D_l)；`lambda` 为覆盖度校正参数，None 表示不做校正。
-fn joint_ani_from_classes(classes: &FxHashMap<u8, (usize, usize)>, lambda: Option<f64>, mismatch: usize) -> Option<f64> {
+/// `e` 为 per-base read error rate（仅 mismatch=1 的 error-aware 反推使用；e=0 即旧行为）。
+fn joint_ani_from_classes(classes: &FxHashMap<u8, (usize, usize)>, lambda: Option<f64>, mismatch: usize, e: f64) -> Option<f64> {
     if mismatch == 0 {
         // exact matching：c_adj = a^ℓ，对 log 空间做加权最小二乘。
         let mut num = 0.0;
@@ -781,7 +786,8 @@ fn joint_ani_from_classes(classes: &FxHashMap<u8, (usize, usize)>, lambda: Optio
         }
         Some((num / den).exp())
     } else {
-        // ≤1 mismatch：先除以覆盖度校正因子得到 P_detect(a,ℓ)，再逐长度类反解 a，最后加权平均。
+        // ≤1 mismatch：先除以覆盖度校正因子得到 P_detect(q,ℓ)，再逐长度类反解 q 并除以
+        // (1-e) 恢复真实 ANI a（error-aware；e=0 时与旧公式完全一致），最后加权平均。
         let mut weighted_a = 0.0;
         let mut total_weight = 0.0;
         for (&len, &(n_l, d_l)) in classes {
@@ -798,7 +804,7 @@ fn joint_ani_from_classes(classes: &FxHashMap<u8, (usize, usize)>, lambda: Optio
             } else {
                 c
             };
-            let a_est = ani_from_containment_one_mismatch(c_adj, len as usize);
+            let a_est = ani_from_containment_one_mismatch_err(c_adj, len as usize, e);
             let weight = n_l as f64 * len as f64;
             weighted_a += weight * a_est;
             total_weight += weight;
@@ -821,6 +827,7 @@ fn calculate_statistics(
     query_tags: usize,
     total_ref_tags: usize,
     mismatch: usize,
+    error_rate: f64,
 ) -> QueryResult {
     let shared = covs.len();
     if shared == 0 || total_ref_tags == 0 || tag_lengths.len() != total_ref_tags {
@@ -848,7 +855,7 @@ fn calculate_statistics(
     }
 
     // 朴素 ANI：不做覆盖度校正
-    let naive_ani = joint_ani_from_classes(&length_classes, None, mismatch)
+    let naive_ani = joint_ani_from_classes(&length_classes, None, mismatch, error_rate)
         .unwrap_or_else(|| {
             if mismatch == 1 {
                 // 单长度类时退到主导长度；无长度信息时用 K=32 近似。
@@ -856,7 +863,7 @@ fn calculate_statistics(
                     .max_by_key(|(_, (n, _))| *n)
                     .map(|(&l, _)| l as usize)
                     .unwrap_or(K as usize);
-                ani_from_containment_one_mismatch(containment, dominant_len)
+                ani_from_containment_one_mismatch_err(containment, dominant_len, error_rate)
             } else {
                 containment.powf(1.0 / K)
             }
@@ -869,7 +876,7 @@ fn calculate_statistics(
     } else {
         match ratio_lambda(&full_covs, MIN_COUNT_CORRECT) {
             Some(lam) => (
-                joint_ani_from_classes(&length_classes, Some(lam), mismatch).unwrap_or(naive_ani),
+                joint_ani_from_classes(&length_classes, Some(lam), mismatch, error_rate).unwrap_or(naive_ani),
                 lam,
             ),
             None => (naive_ani, mean_geq1), // 点数不足，无法估计 lambda：回退到朴素 ANI
@@ -1004,6 +1011,157 @@ fn lookup_tag_coverage(
     None
 }
 
+// ---- read error rate 估计（--mismatch 1 的 error-aware ANI 反推） ----
+
+/// e 估计要求候选基因组至少有这么多个 exact-match tag，否则噪声太大。
+const MIN_TAGS_FOR_ERROR_EST: usize = 100;
+/// 用于 e 估计的"近同一基因组"阈值：mm0 模型 ANI ≥ 此值的基因组才用于估计。
+/// 保守取 0.98：更趋异的基因组会把真实分歧 a 误当成错误 e（a/e 混淆）。
+const ERROR_EST_MIN_ANI: f64 = 0.98;
+/// 没有基因组达到 ERROR_EST_MIN_ANI 时，退而使用的 top-N 候选（按 exact containment）。
+const ERROR_EST_TOP_N: usize = 5;
+/// 估计出的 e 上限（超出视为估计失败迹象，截断并告警）。
+const MAX_READ_ERROR_RATE: f64 = 0.5;
+
+/// 由按长度类汇总的 (exact 命中 read 数 E_l, mm1 命中 read 数 M_l) 估计 per-base read error rate。
+///
+/// 模型：对近同一基因组（a≈1），每条 read 上的同源 tag 以 per-base 概率 q = a(1-e) ≈ 1-e
+/// 被观察到，故按 read 计数 E[mm1]/E[exact] = ℓ(1-q)/q，即
+///   q_l = ℓ·E_l / (ℓ·E_l + M_l)，e_l = M_l / (ℓ·E_l + M_l)。
+/// 按 read（覆盖度重数）计数而非 distinct tag：每条 read 是独立抽样，比例不受覆盖度
+/// 影响；若按 tag 存在性计数，多覆盖 tag 只要有一条无错 read 就记为 exact，会系统性
+/// 低估 e。跨长度类以 exact read 数加权合并为全局 e。
+/// 返回 None 表示无法估计（调用方回退 e=0）。
+fn pooled_error_rate(classes: &FxHashMap<u8, (u64, u64)>) -> Option<f64> {
+    let mut weighted_e = 0.0;
+    let mut total_exact = 0u64;
+    let mut total_mm1 = 0u64;
+    for (&len, &(exact, mm1)) in classes {
+        total_exact += exact;
+        total_mm1 += mm1;
+        if exact == 0 {
+            continue;
+        }
+        let l = len as f64;
+        let e_l = mm1 as f64 / (l * exact as f64 + mm1 as f64);
+        weighted_e += exact as f64 * e_l;
+    }
+    if total_exact < MIN_TAGS_FOR_ERROR_EST as u64 {
+        return None; // tag 太少，估计不可靠
+    }
+    if total_mm1 == 0 {
+        return Some(0.0); // 没有 mm1-only 命中：e≈0（也可能全基因组 exact，属正常）
+    }
+    Some(weighted_e / total_exact as f64)
+}
+
+/// 从 top 候选基因组估计样本的 per-base read error rate e（--mismatch 1 专用）。
+///
+/// 候选选择：先取 mm0 模型 ANI ≥ ERROR_EST_MIN_ANI 的基因组（保守，减少 a/e 混淆）；
+/// 若无，退到 exact containment 最高的前 ERROR_EST_TOP_N 个。对这些基因组统计每个参考
+/// tag 是 exact 命中还是 mm1-only 命中，交给 `pooled_error_rate`。
+/// 估计不可行（无候选 / tag 太少）时返回 0.0 并打日志 —— 即退化为旧的未校正行为。
+fn estimate_read_error_rate(db_entries: &[SyldbEntry], sample_counts: &FxHashMap<Hash, u32>) -> f64 {
+    // 第一遍：计算每个基因组的 exact containment 与 mm0-ANI（按主导长度类）。
+    let mut scored: Vec<(f64, &SyldbEntry)> = Vec::new(); // (exact containment, entry)
+    for db_entry in db_entries {
+        if db_entry.tags.is_empty() || db_entry.tag_seqs.is_none() {
+            continue;
+        }
+        let n_exact = db_entry.tags.iter()
+            .filter(|t| sample_counts.get(*t).map_or(false, |&c| c > 0))
+            .count();
+        let c0 = n_exact as f64 / db_entry.tags.len() as f64;
+        if c0 > 0.0 {
+            scored.push((c0, db_entry));
+        }
+    }
+    if scored.is_empty() {
+        eprintln!("Read error rate: no genomes with exact matches; falling back to e=0 (uncorrected mm1 ANI)");
+        return 0.0;
+    }
+
+    // 主导长度类（按 tag 数）用于 mm0-ANI 粗估。
+    let dominant_len = |entry: &SyldbEntry| -> usize {
+        let mut by_len: FxHashMap<u8, usize> = FxHashMap::default();
+        for &l in &entry.tag_lengths {
+            *by_len.entry(l).or_insert(0) += 1;
+        }
+        by_len.into_iter().max_by_key(|(_, n)| *n).map(|(l, _)| l as usize).unwrap_or(K as usize)
+    };
+
+    let mut selected: Vec<&SyldbEntry> = scored.iter()
+        .filter(|(c0, entry)| c0.powf(1.0 / dominant_len(entry) as f64) >= ERROR_EST_MIN_ANI)
+        .map(|(_, entry)| *entry)
+        .collect();
+    if selected.is_empty() {
+        // 没有近同一基因组：退到 exact containment 最高的 top-N，并在日志中提示
+        // 此时 e 可能与真实分歧 a 混淆（趋异群落中应谨慎解释）。
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        selected = scored.iter().take(ERROR_EST_TOP_N).map(|(_, entry)| *entry).collect();
+        eprintln!("Read error rate: no genome with mm0-ANI >= {:.0}%; using top {} genomes by exact containment (e may be confounded with true divergence)",
+                  ERROR_EST_MIN_ANI * 100.0, selected.len());
+    }
+
+    // 第二遍：对候选基因组逐 tag 统计 exact / mm1 命中的 read 数（按长度类）。
+    // 一个样本 tag 若是多个候选 ref tag 的邻居会被重复计入 M，这种情况罕见，对比例影响可忽略。
+    let mut classes: FxHashMap<u8, (u64, u64)> = FxHashMap::default();
+    for entry in &selected {
+        let tag_seqs = entry.tag_seqs.as_ref().unwrap();
+        for (i, tag) in entry.tags.iter().enumerate() {
+            let len = entry.tag_lengths.get(i).copied().unwrap_or(K as u8);
+            let c_exact = sample_counts.get(tag).copied().unwrap_or(0) as u64;
+            let mut c_mm1 = 0u64;
+            if let Some(seq) = tag_seqs.get(i) {
+                for h in one_mismatch_canonical_hashes(seq) {
+                    if let Some(&c) = sample_counts.get(&h) {
+                        c_mm1 += c as u64;
+                    }
+                }
+            }
+            let e = classes.entry(len).or_insert((0, 0));
+            e.0 += c_exact;
+            e.1 += c_mm1;
+        }
+    }
+
+    match pooled_error_rate(&classes) {
+        Some(e) if e > MAX_READ_ERROR_RATE => {
+            eprintln!("Read error rate: estimated e={:.4} exceeds {:.2}; clamping (estimate likely unreliable)",
+                      e, MAX_READ_ERROR_RATE);
+            MAX_READ_ERROR_RATE
+        }
+        Some(e) => {
+            eprintln!("Read error rate: estimated e={:.4} from {} candidate genome(s)", e, selected.len());
+            e
+        }
+        None => {
+            eprintln!("Read error rate: too few matched tags to estimate; falling back to e=0 (uncorrected mm1 ANI)");
+            0.0
+        }
+    }
+}
+
+/// 决定一次比对实际使用的 read error rate：
+/// `--no-error-correction` → 0（旧行为）；`--read-error-rate` → 固定值；
+/// 否则（仅 mismatch=1）用 `estimate_read_error_rate` 的数据驱动估计。mismatch=0 恒为 0。
+fn sample_error_rate(
+    db_entries: &[SyldbEntry],
+    sample_counts: &FxHashMap<Hash, u32>,
+    mismatch: usize,
+    override_e: Option<f64>,
+    no_error_correction: bool,
+) -> f64 {
+    if mismatch == 0 || no_error_correction {
+        return 0.0;
+    }
+    if let Some(e) = override_e {
+        eprintln!("Read error rate: using fixed e={:.4} from --read-error-rate", e);
+        return e.clamp(0.0, MAX_READ_ERROR_RATE);
+    }
+    estimate_read_error_rate(db_entries, sample_counts)
+}
+
 fn filter_results(result: &QueryResult, min_ani: Option<f64>, min_tags_genome: usize) -> bool {
     // 只按 sylph 的方式过滤：有命中、基因组足够大、且（覆盖度校正后的）ANI 达标。
     if result.shared_tags == 0 {
@@ -1041,6 +1199,8 @@ fn query_single_file_with_cached_db(
     mismatch: usize,
     min_shared_tags: usize,
     min_tags_genome: usize,
+    read_error_rate: Option<f64>,
+    no_error_correction: bool,
 ) -> Result<Vec<QueryResult>> {
     eprintln!("Processing sample file with cached database: {}", sample_path);
     
@@ -1076,6 +1236,7 @@ fn query_single_file_with_cached_db(
             // 统计样本中每个 tag 的覆盖度（重数）
             let sample_counts = sample_tag_counts_ref(entries);
             let total_sample_tags = entries.len();
+            let error_rate = sample_error_rate(cached_db_entries, &sample_counts, mismatch, read_error_rate, no_error_correction);
 
             // 并行处理每个基因组（已按基因组聚合）进行比对
             cached_db_entries.par_iter().filter_map(|db_entry| {
@@ -1091,7 +1252,7 @@ fn query_single_file_with_cached_db(
                     })
                     .collect();
 
-                let mut result = calculate_statistics(covs, &db_entry.tag_lengths, total_sample_tags, db_entry.tags.len(), mismatch);
+                let mut result = calculate_statistics(covs, &db_entry.tag_lengths, total_sample_tags, db_entry.tags.len(), mismatch, error_rate);
                 result.sample_file = sample_source.clone();
                 result.genome_file = db_path.to_string();
                 result.contig_name = db_entry.sequence_id.clone();
@@ -1158,6 +1319,8 @@ pub fn query_single_file(sample_path: &str, db_path: &str, min_ani: f64, mismatc
             // 统计样本中每个 tag 的覆盖度（重数）
             let sample_counts = sample_tag_counts_ref(entries);
             let total_sample_tags = entries.len();
+            // 无 CLI 上下文：mm1 默认使用数据驱动的 e 估计
+            let error_rate = sample_error_rate(&db_entries, &sample_counts, mismatch, None, false);
 
             // 并行处理每个基因组进行比对
             db_entries.par_iter().filter_map(|db_entry| {
@@ -1168,7 +1331,7 @@ pub fn query_single_file(sample_path: &str, db_path: &str, min_ani: f64, mismatc
                     })
                     .collect();
 
-                let mut result = calculate_statistics(covs, &db_entry.tag_lengths, total_sample_tags, db_entry.tags.len(), mismatch);
+                let mut result = calculate_statistics(covs, &db_entry.tag_lengths, total_sample_tags, db_entry.tags.len(), mismatch, error_rate);
                 result.sample_file = sample_source.clone();
                 result.genome_file = db_path.to_string();
                 result.contig_name = db_entry.sequence_id.clone();
@@ -1689,7 +1852,7 @@ pub fn profile(args: ProfileArgs) -> Result<()> {
     chunks.into_iter().for_each(|chunk| {
         chunk.into_par_iter().for_each(|sample_file| {
             // 第一阶段：计算初步结果（不使用重新分配）
-            if let Ok(initial_results) = query_single_file_with_cached_db(&sample_file, &args.db_file, &cached_db_entries, &cached_sample_entries, effective_min_ani, args.mismatch, min_shared_tags, min_tags_genome) {
+            if let Ok(initial_results) = query_single_file_with_cached_db(&sample_file, &args.db_file, &cached_db_entries, &cached_sample_entries, effective_min_ani, args.mismatch, min_shared_tags, min_tags_genome, args.read_error_rate, args.no_error_correction) {
                 // 按ANI排序
                 let mut initial_results = initial_results;
                 initial_results.sort_by(|a, b| b.adjusted_ani.partial_cmp(&a.adjusted_ani).unwrap());
@@ -1711,7 +1874,9 @@ pub fn profile(args: ProfileArgs) -> Result<()> {
                         false,
                         args.mismatch,
                         min_shared_tags,
-                        min_tags_genome
+                        min_tags_genome,
+                        args.read_error_rate,
+                        args.no_error_correction
                     );
                     
                     // 第三阶段：过滤过度重新分配的基因组
@@ -2018,11 +2183,146 @@ mod tests {
         let covs = vec![1u32; 70];
         let tag_lengths = vec![32u8; total_ref];
 
-        let exact_result = calculate_statistics(covs.clone(), &tag_lengths, 1000, total_ref, 0);
-        let mm_result = calculate_statistics(covs, &tag_lengths, 1000, total_ref, 1);
+        let exact_result = calculate_statistics(covs.clone(), &tag_lengths, 1000, total_ref, 0, 0.0);
+        let mm_result = calculate_statistics(covs, &tag_lengths, 1000, total_ref, 1, 0.0);
 
         assert_eq!(exact_result.shared_tags, mm_result.shared_tags);
         assert!(exact_result.adjusted_ani > mm_result.adjusted_ani,
             "exact ANI {} should be > mismatch ANI {}", exact_result.adjusted_ani, mm_result.adjusted_ani);
+    }
+
+    #[test]
+    fn test_error_aware_inversion_recovers_true_ani() {
+        // 合成场景：真实 ANI a=0.97，per-base 错误率 e=0.005，tag 长 ℓ=32。
+        // 观察模型：q = a(1-e)，C = P(≤1 mismatch | q)。error-aware 反推应恢复 a。
+        let a_true = 0.97;
+        let e = 0.005;
+        let len = 32usize;
+        let q = a_true * (1.0 - e);
+        let c = crate::extract::p_detect_one_mismatch(q, len);
+
+        let a_recovered = ani_from_containment_one_mismatch_err(c, len, e);
+        assert!((a_recovered - a_true).abs() < 0.002,
+            "error-aware inversion recovered {}, expected ~{}", a_recovered, a_true);
+
+        // 未校正（旧）反推应明显偏低（约 (1-e) 因子）。
+        let a_uncorrected = ani_from_containment_one_mismatch(c, len);
+        assert!(a_uncorrected < a_true - 0.003,
+            "uncorrected inversion {} should be biased well below {}", a_uncorrected, a_true);
+    }
+
+    #[test]
+    fn test_error_aware_inversion_e0_matches_old() {
+        // e=0 时必须与旧公式逐位一致。
+        for &len in &[30usize, 32, 34] {
+            for &c in &[0.05, 0.3, 0.7, 0.95, 1.0] {
+                let old = ani_from_containment_one_mismatch(c, len);
+                let new = ani_from_containment_one_mismatch_err(c, len, 0.0);
+                assert!((old - new).abs() < 1e-12, "len={} c={}: {} vs {}", len, c, old, new);
+            }
+        }
+    }
+
+    #[test]
+    fn test_pooled_error_rate_recovers_e() {
+        // ℓ=32，q=0.995（e=0.005）：E[mm1-only]/E[exact] = ℓ(1-q)/q。
+        let len = 32u8;
+        let q = 0.995f64;
+        let exact = 10_000u64;
+        let mm1 = (len as f64 * (1.0 - q) / q * exact as f64).round() as u64;
+        let mut classes: FxHashMap<u8, (u64, u64)> = FxHashMap::default();
+        classes.insert(len, (exact, mm1));
+        let e = pooled_error_rate(&classes).expect("should estimate");
+        assert!((e - 0.005).abs() < 0.0005, "estimated e={}", e);
+
+        // tag 太少 → None（调用方回退 e=0）。
+        let mut sparse: FxHashMap<u8, (u64, u64)> = FxHashMap::default();
+        sparse.insert(len, (10, 1));
+        assert!(pooled_error_rate(&sparse).is_none());
+    }
+
+    #[test]
+    fn test_sample_error_rate_override_paths() {
+        // --no-error-correction 恒为 0（即使有 override）；--read-error-rate 优先；
+        // 无 override 且 mm1 时走数据估计。这里用空 DB/样本触发估计回退（e=0）。
+        let empty_db: Vec<SyldbEntry> = Vec::new();
+        let empty_counts: FxHashMap<Hash, u32> = FxHashMap::default();
+
+        assert_eq!(sample_error_rate(&empty_db, &empty_counts, 1, Some(0.01), true), 0.0);
+        assert_eq!(sample_error_rate(&empty_db, &empty_counts, 1, Some(0.01), false), 0.01);
+        // mismatch=0 时完全忽略 error correction 设置。
+        assert_eq!(sample_error_rate(&empty_db, &empty_counts, 0, Some(0.01), false), 0.0);
+        // 无 override + 无数据 → 估计回退到 0（旧行为）。
+        assert_eq!(sample_error_rate(&empty_db, &empty_counts, 1, None, false), 0.0);
+    }
+
+    #[test]
+    fn test_estimate_read_error_rate_synthetic() {
+        // 构造一个"近同一"基因组：1000 个长度 32 的参考 tag。
+        // 样本中 exact 命中 900 个，另有 144 个以 1-mismatch 邻居形式命中
+        // （比例 ≈ ℓ(1-q)/q = 32·0.005/0.995 ≈ 0.1608 → e 应估计为 ~0.005）。
+        let n_tags = 1000usize;
+        let n_exact = 900usize;
+        let n_mm1 = 144usize;
+        let mut tags = Vec::with_capacity(n_tags);
+        let mut tag_seqs = Vec::with_capacity(n_tags);
+        let mut sample_counts: FxHashMap<Hash, u32> = FxHashMap::default();
+
+        // 与 extract 侧一致的 canonical 形式（正向与反向互补取字典序较小者）。
+        let revcomp = |s: &[u8]| -> Vec<u8> {
+            s.iter().rev().map(|b| match b { b'A' => b'T', b'T' => b'A', b'C' => b'G', _ => b'C' }).collect()
+        };
+        let canon = |s: &[u8]| -> Vec<u8> {
+            let rc = revcomp(s);
+            if s <= rc.as_slice() { s.to_vec() } else { rc }
+        };
+
+        // 用确定性伪随机序列作为 tag（互不相同的合法 ACGT 序列即可）。
+        let mut rng: u64 = 0x9e3779b97f4a7c15;
+        let mut mk_seq = move || -> Vec<u8> {
+            (0..32).map(|_| {
+                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                b"ACGT"[(rng >> 33) as usize & 3]
+            }).collect()
+        };
+
+        for _ in 0..n_exact {
+            let seq = canon(&mk_seq());
+            tags.push(hash_bytes(&seq));
+            sample_counts.insert(hash_bytes(&seq), 1);
+            tag_seqs.push(seq);
+        }
+        // mm1-only：把序列的第 5 位换成不同碱基，样本里只存突变体的 canonical hash。
+        for _ in 0..n_mm1 {
+            let seq = canon(&mk_seq());
+            let mut mutated = seq.clone();
+            mutated[5] = match mutated[5] { b'A' => b'C', b'C' => b'G', b'G' => b'T', _ => b'A' };
+            let m_hash = hash_bytes(&canon(&mutated));
+            // one_mismatch_canonical_hashes 应覆盖该突变体；防御性检查，不满足就跳过。
+            if one_mismatch_canonical_hashes(&seq).contains(&m_hash) {
+                tags.push(hash_bytes(&seq));
+                sample_counts.insert(m_hash, 1);
+                tag_seqs.push(seq);
+            }
+        }
+        // 其余 tag 不在样本中。
+        while tags.len() < n_tags {
+            let seq = canon(&mk_seq());
+            tags.push(hash_bytes(&seq));
+            tag_seqs.push(seq);
+        }
+
+        let entry = SyldbEntry {
+            sequence_id: "g1".to_string(),
+            tags,
+            tag_lengths: vec![32u8; n_tags],
+            genome_source: "g1".to_string(),
+            tag_uniqueness: None,
+            tag_seqs: Some(tag_seqs),
+            enzyme: "BcgI".to_string(),
+        };
+        let db = vec![entry];
+        let e = estimate_read_error_rate(&db, &sample_counts);
+        assert!((e - 0.005).abs() < 0.002, "estimated e={}", e);
     }
 }
