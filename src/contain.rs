@@ -318,6 +318,7 @@ fn recalculate_with_winner_table(
     log_reassign: bool,
     mismatch: usize,
     min_shared_tags: usize,
+    min_tags_genome: usize,
 ) -> Vec<QueryResult> {
     eprintln!("Recalculating with winner table for {} database entries and {} sample entries", 
               db_entries.len(), sample_entries.len());
@@ -340,7 +341,7 @@ fn recalculate_with_winner_table(
         // 为每个基因组（已聚合）计算重新分配后的结果
         for db_entry in db_entries {
             // 最小标签数过滤
-            if db_entry.tags.len() < MIN_TAGS_FOR_GENOME {
+            if db_entry.tags.len() < min_tags_genome {
                 continue;
             }
 
@@ -383,7 +384,7 @@ fn recalculate_with_winner_table(
             result.contig_name = db_entry.sequence_id.clone();
 
             // 应用profile专用的过滤条件
-            if filter_results_for_profile(&result, Some(min_ani), min_shared_tags) {
+            if filter_results_for_profile(&result, Some(min_ani), min_shared_tags, min_tags_genome) {
                 all_results.push(result);
             }
         }
@@ -521,7 +522,7 @@ fn recalculate_abundances_after_reassignment(
 // 阈值（对齐 sylph 默认值）
 const MIN_ANI: f64 = 90.0;                // sylph query 默认 (was 95)
 const PROFILE_MIN_ANI: f64 = 95.0;        // sylph profile 默认 (was 97)
-const MIN_TAGS_FOR_GENOME: usize = 50;    // 基因组最小标签数 (sylph min_number_kmers)
+pub const MIN_TAGS_FOR_GENOME: usize = 50;    // 基因组最小标签数 (sylph min_number_kmers)
 pub const MIN_SHARED_TAGS_FOR_PROFILE: usize = 100; // 覆盖度校正后报告一个基因组所需的最小共享 tag 数；防止极低 tag 数下的虚假优势调用
 // 2bRAD tag 长度，用作 containment->ANI 的指数。BcgI=32；理想情况下应随酶/数据库存储。
 const K: f64 = 32.0;
@@ -642,7 +643,7 @@ pub fn query(args: ContainArgs) -> Result<()> {
                 result.contig_name = db_entry.sequence_id.clone();
 
                 // 应用过滤条件
-                if filter_results(&result, args.minimum_ani) {
+                if filter_results(&result, args.minimum_ani, args.min_tags_genome) {
                     print_result(&result, &writer)?;
                 }
             }
@@ -1003,12 +1004,12 @@ fn lookup_tag_coverage(
     None
 }
 
-fn filter_results(result: &QueryResult, min_ani: Option<f64>) -> bool {
+fn filter_results(result: &QueryResult, min_ani: Option<f64>, min_tags_genome: usize) -> bool {
     // 只按 sylph 的方式过滤：有命中、基因组足够大、且（覆盖度校正后的）ANI 达标。
     if result.shared_tags == 0 {
         return false;
     }
-    if result.ref_tags < MIN_TAGS_FOR_GENOME {
+    if result.ref_tags < min_tags_genome {
         return false;
     }
     let effective_min_ani = min_ani.unwrap_or(MIN_ANI);
@@ -1016,11 +1017,11 @@ fn filter_results(result: &QueryResult, min_ani: Option<f64>) -> bool {
 }
 
 // profile 专用过滤（阈值更严，但同样依赖覆盖度校正后的 ANI）
-fn filter_results_for_profile(result: &QueryResult, min_ani: Option<f64>, min_shared_tags: usize) -> bool {
+fn filter_results_for_profile(result: &QueryResult, min_ani: Option<f64>, min_shared_tags: usize, min_tags_genome: usize) -> bool {
     if result.shared_tags == 0 {
         return false;
     }
-    if result.ref_tags < MIN_TAGS_FOR_GENOME {
+    if result.ref_tags < min_tags_genome {
         return false;
     }
     if result.shared_tags < min_shared_tags {
@@ -1039,6 +1040,7 @@ fn query_single_file_with_cached_db(
     min_ani: f64,
     mismatch: usize,
     min_shared_tags: usize,
+    min_tags_genome: usize,
 ) -> Result<Vec<QueryResult>> {
     eprintln!("Processing sample file with cached database: {}", sample_path);
     
@@ -1078,7 +1080,7 @@ fn query_single_file_with_cached_db(
             // 并行处理每个基因组（已按基因组聚合）进行比对
             cached_db_entries.par_iter().filter_map(|db_entry| {
                 // 基因组太小/太碎则跳过（sylph min_number_kmers）
-                if db_entry.tags.len() < MIN_TAGS_FOR_GENOME {
+                if db_entry.tags.len() < min_tags_genome {
                     return None;
                 }
 
@@ -1095,7 +1097,7 @@ fn query_single_file_with_cached_db(
                 result.contig_name = db_entry.sequence_id.clone();
 
                 // 应用profile专用的过滤条件
-                if filter_results_for_profile(&result, Some(min_ani), min_shared_tags) {
+                if filter_results_for_profile(&result, Some(min_ani), min_shared_tags, min_tags_genome) {
                     Some(result)
                 } else {
                     None
@@ -1112,7 +1114,7 @@ fn query_single_file_with_cached_db(
 }
 
 // 添加新的公共函数用于单个文件的查询（保持原有接口不变）
-pub fn query_single_file(sample_path: &str, db_path: &str, min_ani: f64, mismatch: usize) -> Result<Vec<QueryResult>> {
+pub fn query_single_file(sample_path: &str, db_path: &str, min_ani: f64, mismatch: usize, min_tags_genome: usize) -> Result<Vec<QueryResult>> {
     eprintln!("Processing database file: {}", db_path);
     
     // 读取数据库文件
@@ -1171,7 +1173,7 @@ pub fn query_single_file(sample_path: &str, db_path: &str, min_ani: f64, mismatc
                 result.genome_file = db_path.to_string();
                 result.contig_name = db_entry.sequence_id.clone();
 
-                if filter_results(&result, Some(min_ani)) {
+                if filter_results(&result, Some(min_ani), min_tags_genome) {
                     Some(result)
                 } else {
                     None
@@ -1617,8 +1619,10 @@ pub fn profile(args: ProfileArgs) -> Result<()> {
     let effective_min_ani = args.minimum_ani.unwrap_or(PROFILE_MIN_ANI);
     let min_eff_coverage = args.min_eff_coverage;
     let min_shared_tags = args.min_shared_tags;
+    let min_tags_genome = args.min_tags_genome;
     eprintln!("Using minimum ANI threshold: {:.1}%", effective_min_ani);
     eprintln!("Using minimum shared tags threshold: {}", min_shared_tags);
+    eprintln!("Using minimum tags per genome threshold: {}", min_tags_genome);
     if min_eff_coverage > 0.0 {
         eprintln!("Using minimum effective coverage threshold: {:.2}", min_eff_coverage);
     }
@@ -1685,7 +1689,7 @@ pub fn profile(args: ProfileArgs) -> Result<()> {
     chunks.into_iter().for_each(|chunk| {
         chunk.into_par_iter().for_each(|sample_file| {
             // 第一阶段：计算初步结果（不使用重新分配）
-            if let Ok(initial_results) = query_single_file_with_cached_db(&sample_file, &args.db_file, &cached_db_entries, &cached_sample_entries, effective_min_ani, args.mismatch, min_shared_tags) {
+            if let Ok(initial_results) = query_single_file_with_cached_db(&sample_file, &args.db_file, &cached_db_entries, &cached_sample_entries, effective_min_ani, args.mismatch, min_shared_tags, min_tags_genome) {
                 // 按ANI排序
                 let mut initial_results = initial_results;
                 initial_results.sort_by(|a, b| b.adjusted_ani.partial_cmp(&a.adjusted_ani).unwrap());
@@ -1706,7 +1710,8 @@ pub fn profile(args: ProfileArgs) -> Result<()> {
                         effective_min_ani,
                         false,
                         args.mismatch,
-                        min_shared_tags
+                        min_shared_tags,
+                        min_tags_genome
                     );
                     
                     // 第三阶段：过滤过度重新分配的基因组
@@ -1788,7 +1793,7 @@ pub fn profile(args: ProfileArgs) -> Result<()> {
             r.common_tags > 0 &&
             r.common_tags >= min_shared_tags &&
             r.adjusted_ani >= effective_min_ani &&
-            r.total_tags >= MIN_TAGS_FOR_GENOME &&
+            r.total_tags >= min_tags_genome &&
             r.eff_cov >= min_eff_coverage
         });
         
@@ -1961,18 +1966,24 @@ mod tests {
     fn test_min_shared_tag_guard() {
         // A result with enough shared tags and high enough ANI should pass.
         let ok_result = dummy_result(MIN_SHARED_TAGS_FOR_PROFILE, MIN_TAGS_FOR_GENOME, PROFILE_MIN_ANI + 1.0);
-        assert!(filter_results_for_profile(&ok_result, None, MIN_SHARED_TAGS_FOR_PROFILE));
+        assert!(filter_results_for_profile(&ok_result, None, MIN_SHARED_TAGS_FOR_PROFILE, MIN_TAGS_FOR_GENOME));
 
         // A result with too few shared tags should be filtered out, even if ANI is high.
         let low_tag_result = dummy_result(MIN_SHARED_TAGS_FOR_PROFILE - 1, MIN_TAGS_FOR_GENOME, PROFILE_MIN_ANI + 1.0);
-        assert!(!filter_results_for_profile(&low_tag_result, None, MIN_SHARED_TAGS_FOR_PROFILE));
+        assert!(!filter_results_for_profile(&low_tag_result, None, MIN_SHARED_TAGS_FOR_PROFILE, MIN_TAGS_FOR_GENOME));
 
         // Lowering the threshold should admit the same low-tag result.
-        assert!(filter_results_for_profile(&low_tag_result, None, 1));
+        assert!(filter_results_for_profile(&low_tag_result, None, 1, MIN_TAGS_FOR_GENOME));
+
+        // A small genome (few reference tags) is filtered at the default threshold but
+        // admitted when min_tags_genome is lowered.
+        let small_genome_result = dummy_result(MIN_SHARED_TAGS_FOR_PROFILE, MIN_TAGS_FOR_GENOME - 1, PROFILE_MIN_ANI + 1.0);
+        assert!(!filter_results_for_profile(&small_genome_result, None, MIN_SHARED_TAGS_FOR_PROFILE, MIN_TAGS_FOR_GENOME));
+        assert!(filter_results_for_profile(&small_genome_result, None, MIN_SHARED_TAGS_FOR_PROFILE, 20));
 
         // A result with zero shared tags should always be filtered out.
         let zero_result = dummy_result(0, MIN_TAGS_FOR_GENOME, PROFILE_MIN_ANI + 1.0);
-        assert!(!filter_results_for_profile(&zero_result, None, 1));
+        assert!(!filter_results_for_profile(&zero_result, None, 1, MIN_TAGS_FOR_GENOME));
     }
 
     #[test]

@@ -193,6 +193,8 @@ pub struct ContainArgs {
     pub min_count_correct: f64,
     #[clap(short='M',long, default_value_t = 50., help_heading = "ALGORITHM", help = "Exclude genomes with less than this number of extracted 2bRAD tags")]
     pub min_number_kmers: f64,
+    #[clap(long, default_value_t = crate::contain::MIN_TAGS_FOR_GENOME, help_heading = "ALGORITHM", help = "Exclude genomes with fewer than N matched tags (default 50; lower values increase sensitivity on large dense databases)")]
+    pub min_tags_genome: usize,
     #[clap(short, long="minimum-ani", help_heading = "ALGORITHM", help = "Minimum adjusted ANI to consider (0-100). Default is 90 for query and 95 for profile. Smaller than 95 for profile will give inaccurate results." )]
     pub minimum_ani: Option<f64>,
     #[clap(short, default_value_t = 3, help = "Number of threads")]
@@ -311,6 +313,9 @@ pub struct ProfileArgs {
 
     #[arg(long, default_value_t = crate::contain::MIN_SHARED_TAGS_FOR_PROFILE, help_heading = "ALGORITHM", help = "Minimum shared tags required to report a genome in profile (default 100; lower values increase sensitivity on large dense databases)")]
     pub min_shared_tags: usize,
+
+    #[arg(long, default_value_t = crate::contain::MIN_TAGS_FOR_GENOME, help_heading = "ALGORITHM", help = "Exclude genomes with fewer than N matched tags (default 50; lower values increase sensitivity on large dense databases)")]
+    pub min_tags_genome: usize,
 }
 
 #[derive(Debug)]
