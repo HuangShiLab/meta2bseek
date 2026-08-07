@@ -344,8 +344,17 @@ fn inspect_sp(reader: BufReader<File>, file_path: &str) -> Result<InspectResult>
     }
 
     let distribution = calculate_tag_distribution(&tag_lengths);
-    // 样本文件 (.sylsp) 不存储酶信息
-    let enzyme = "unknown".to_string();
+    // 样本文件自描述酶信息（新版格式存储；旧格式无此字段，显示 unknown）
+    let enzyme = {
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for e in &entries {
+            if !e.enzyme.is_empty() {
+                *counts.entry(e.enzyme.as_str()).or_insert(0) += 1;
+            }
+        }
+        counts.into_iter().max_by_key(|(_, c)| *c).map(|(e, _)| e.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    };
     let patterns = Vec::new();
     let _matched_count = 0usize;
     let _matched_ratio = 0.0;

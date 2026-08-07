@@ -5,6 +5,7 @@ use crate::sketch::SequencesSketch;
 use crate::extract::GenomeSketch;
 use anyhow::{Context, Result};
 use bincode;
+use bincode::Options;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
@@ -32,6 +33,8 @@ struct ViewResult {
     kmer_length_distribution: Vec<(usize, usize, f64)>,
     min_spacing: Option<usize>,
     genome_stats: Option<Vec<GenomeStats>>,
+    // tag 数据库/样本 sketch（.syldb/.sylsp）自描述的酶信息；sketch 格式无此信息
+    enzyme: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -78,6 +81,9 @@ pub fn view(args: ViewArgs) -> Result<()> {
                 writeln!(writer, "----------------")?;
                 writeln!(writer, "File: {}", result.file_name)?;
                 writeln!(writer, "Type: {}", result.file_type)?;
+                if let Some(enzyme) = &result.enzyme {
+                    writeln!(writer, "Enzyme: {}", enzyme)?;
+                }
                 writeln!(writer, "C-value: {}", result.c)?;
                 writeln!(writer, "K-size: {}", result.k)?;
                 
@@ -172,14 +178,189 @@ pub fn view(args: ViewArgs) -> Result<()> {
 
 fn view_file(file_path: &str) -> Result<ViewResult> {
     let path = Path::new(file_path);
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
 
     match path.extension().and_then(|s| s.to_str()) {
-        Some("db") => view_db(reader, file_path),
-        Some("sp") => view_sp(reader, file_path),
-        _ => Err(anyhow::anyhow!("Unknown file extension, expected .db or .sp")),
+        Some("syldb") => view_syldb(deserialize_exact(file_path)?, file_path),
+        Some("sylsp") => view_sylsp(deserialize_exact(file_path)?, file_path),
+        // .db/.sp 既可能是 tag 格式（Vec<SyldbEntry>/Vec<SylspEntry>，如 .syldb/.sylsp 的
+        // 改名或软链，query 使用），也可能是 sketch 格式（GenomeSketch/SequencesSketch）。
+        // 用"完整消费文件"的严格反序列化探测：只有格式真正匹配才能成功。
+        Some("db") => {
+            if let Ok(entries) = deserialize_exact::<Vec<crate::extract::SyldbEntry>>(file_path) {
+                view_syldb(entries, file_path)
+            } else {
+                view_db(BufReader::new(File::open(path)?), file_path)
+            }
+        }
+        Some("sp") => {
+            if let Ok(entries) = deserialize_exact::<Vec<crate::extract::SylspEntry>>(file_path) {
+                view_sylsp(entries, file_path)
+            } else {
+                view_sp(BufReader::new(File::open(path)?), file_path)
+            }
+        }
+        _ => Err(anyhow::anyhow!("Unknown file extension, expected .db/.syldb or .sp/.sylsp")),
     }
+}
+
+/// 严格反序列化：fixint 编码（与 serialize_into 的默认配置一致）且要求消费完整个文件。
+/// 避免 bincode 把错误格式"部分解析"成垃圾（或触发巨大分配）。
+fn deserialize_exact<T: serde::de::DeserializeOwned>(file_path: &str) -> Result<T> {
+    let file = File::open(file_path)?;
+    let reader = BufReader::new(file);
+    Ok(bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .reject_trailing_bytes()
+        .deserialize_from(reader)
+        .with_context(|| format!("Failed to deserialize {} (format mismatch or truncated file)", file_path))?)
+}
+
+/// 取条目里非空酶字符串的众数（自描述格式的酶信息）。
+fn modal_enzyme<'a>(enzymes: impl Iterator<Item = &'a str>) -> Option<String> {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for e in enzymes {
+        if !e.is_empty() {
+            *counts.entry(e).or_insert(0) += 1;
+        }
+    }
+    counts.into_iter().max_by_key(|(_, c)| *c).map(|(e, _)| e.to_string())
+}
+
+fn view_syldb(entries: Vec<crate::extract::SyldbEntry>, file_path: &str) -> Result<ViewResult> {
+    if entries.is_empty() {
+        return Err(anyhow::anyhow!("Empty .syldb file"));
+    }
+
+    let mut tag_lengths = Vec::new();
+    let mut genome_sources = std::collections::HashSet::new();
+    let mut genome_stats: HashMap<String, GenomeStats> = HashMap::new();
+    let mut tag_frequency: HashMap<Hash, u32> = HashMap::new();
+
+    for entry in &entries {
+        let source = &entry.genome_source;
+        genome_sources.insert(source.clone());
+
+        let stats = genome_stats.entry(source.clone()).or_insert(GenomeStats {
+            source: source.clone(),
+            num_records: 0,
+            total_kmers: 0,
+            kmer_length_distribution: Vec::new(),
+        });
+        stats.num_records += 1;
+        stats.total_kmers += entry.tags.len();
+
+        for (i, tag) in entry.tags.iter().enumerate() {
+            let len = entry.tag_lengths.get(i).copied().unwrap_or(0) as usize;
+            tag_lengths.push(len);
+            *tag_frequency.entry(*tag).or_insert(0) += 1;
+        }
+    }
+
+    for stats in genome_stats.values_mut() {
+        let mut lengths = Vec::new();
+        for entry in &entries {
+            if entry.genome_source == stats.source {
+                for &l in &entry.tag_lengths {
+                    lengths.push(l as usize);
+                }
+            }
+        }
+        stats.kmer_length_distribution = calculate_kmer_distribution(&lengths);
+    }
+
+    let distribution = calculate_kmer_distribution(&tag_lengths);
+    let unique_kmers = tag_frequency.len();
+    let mut kmer_frequency_stats: Vec<(Hash, u32)> = tag_frequency.into_iter().collect();
+    kmer_frequency_stats.sort_by(|a, b| b.1.cmp(&a.1));
+
+    Ok(ViewResult {
+        file_type: "TagDatabase".to_string(),
+        file_name: file_path.to_string(),
+        c: 0,
+        k: 0,
+        num_records: entries.len(),
+        total_kmers: tag_lengths.len(),
+        unique_kmers,
+        kmer_frequency_stats,
+        mean_read_length: None,
+        first_contig_name: entries.first().map(|e| e.sequence_id.clone()),
+        genome_sources: if genome_sources.is_empty() {
+            None
+        } else {
+            Some(genome_sources.into_iter().collect())
+        },
+        sample_sources: None,
+        per_sample_kmer_counts: None,
+        kmer_lengths: tag_lengths,
+        kmer_length_distribution: distribution,
+        min_spacing: None,
+        genome_stats: Some(genome_stats.into_values().collect()),
+        enzyme: modal_enzyme(entries.iter().map(|e| e.enzyme.as_str())),
+    })
+}
+
+fn view_sylsp(entries: Vec<crate::extract::SylspEntry>, file_path: &str) -> Result<ViewResult> {
+    if entries.is_empty() {
+        return Err(anyhow::anyhow!("Empty .sylsp file"));
+    }
+
+    let mut tag_lengths = Vec::new();
+    let mut sample_stats: HashMap<String, SampleStats> = HashMap::new();
+    let mut tag_frequency: HashMap<Hash, u32> = HashMap::new();
+    let mut per_sample_tag_counts: HashMap<String, HashMap<Hash, u32>> = HashMap::new();
+
+    for entry in &entries {
+        tag_lengths.push(entry.tag_length as usize);
+        *tag_frequency.entry(entry.tag).or_insert(0) += 1;
+
+        let sample_entry = per_sample_tag_counts
+            .entry(entry.sample_source.clone())
+            .or_insert_with(HashMap::new);
+        *sample_entry.entry(entry.tag).or_insert(0) += 1;
+
+        let stats = sample_stats.entry(entry.sample_source.clone()).or_insert(SampleStats {
+            source: entry.sample_source.clone(),
+            num_records: 0,
+            total_kmers: 0,
+            kmer_length_distribution: Vec::new(),
+        });
+        stats.num_records += 1;
+        stats.total_kmers += 1;
+    }
+
+    for stats in sample_stats.values_mut() {
+        let lengths: Vec<usize> = entries.iter()
+            .filter(|e| e.sample_source == stats.source)
+            .map(|e| e.tag_length as usize)
+            .collect();
+        stats.kmer_length_distribution = calculate_kmer_distribution(&lengths);
+    }
+
+    let distribution = calculate_kmer_distribution(&tag_lengths);
+    let unique_kmers = tag_frequency.len();
+    let mut kmer_frequency_stats: Vec<(Hash, u32)> = tag_frequency.into_iter().collect();
+    kmer_frequency_stats.sort_by(|a, b| b.1.cmp(&a.1));
+
+    Ok(ViewResult {
+        file_type: "SampleProfile".to_string(),
+        file_name: file_path.to_string(),
+        c: 0,
+        k: 0,
+        num_records: entries.len(),
+        total_kmers: tag_lengths.len(),
+        unique_kmers,
+        kmer_frequency_stats,
+        mean_read_length: None,
+        first_contig_name: entries.first().map(|e| e.sequence_id.clone()),
+        genome_sources: None,
+        sample_sources: Some(sample_stats.into_values().collect()),
+        per_sample_kmer_counts: Some(per_sample_tag_counts),
+        kmer_lengths: tag_lengths,
+        kmer_length_distribution: distribution,
+        min_spacing: None,
+        genome_stats: None,
+        enzyme: modal_enzyme(entries.iter().map(|e| e.enzyme.as_str())),
+    })
 }
 
 fn view_db(reader: BufReader<File>, file_path: &str) -> Result<ViewResult> {
@@ -269,6 +450,7 @@ fn view_db(reader: BufReader<File>, file_path: &str) -> Result<ViewResult> {
         kmer_length_distribution: distribution,
         min_spacing: Some(min_spacing),
         genome_stats: Some(genome_stats.into_values().collect()),
+        enzyme: None,
     })
 }
 
@@ -381,6 +563,7 @@ fn view_sp(reader: BufReader<File>, file_path: &str) -> Result<ViewResult> {
             kmer_length_distribution: distribution,
             min_spacing: None,
             genome_stats: None,
+            enzyme: None,
         });
     }
     
@@ -441,6 +624,7 @@ fn view_single_sp(sketch: SequencesSketch, file_path: &str) -> Result<ViewResult
         kmer_length_distribution: distribution,
         min_spacing: None,
         genome_stats: None,
+        enzyme: None,
     })
 }
 
@@ -467,7 +651,7 @@ fn calculate_kmer_distribution(kmer_lengths: &[usize]) -> Vec<(usize, usize, f64
 
 fn collect_kmer_matrix_data(result: &ViewResult, kmer_matrix: &mut KmerMatrix) {
     match result.file_type.as_str() {
-        "SampleSketch" => {
+        "SampleSketch" | "SampleProfile" => {
             if let Some(per_sample) = &result.per_sample_kmer_counts {
                 for (sample_name, kmer_counts) in per_sample {
                     if !kmer_matrix.samples.contains(sample_name) {
@@ -484,7 +668,7 @@ fn collect_kmer_matrix_data(result: &ViewResult, kmer_matrix: &mut KmerMatrix) {
                 }
             }
         }
-        "GenomeSketch" => {
+        "GenomeSketch" | "TagDatabase" => {
             // 对于基因组sketch文件，使用文件名作为样本名
             let sample_name = Path::new(&result.file_name)
                 .file_stem()

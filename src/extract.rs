@@ -497,6 +497,11 @@ pub struct SylspEntry {
     /// 该 tag 的长度（bp），用于多酶联合 ANI 的长度分区。
     pub tag_length: u8,
     pub sample_source: String,
+    /// 提取该样本 sketch 时使用的酶（或酶组合），使 .sylsp 文件自描述，
+    /// 用于 profile/query 时与 DB 的酶集合做一致性检查。
+    /// 注意：bincode 不是自描述格式，旧版 .sylsp（无此字段）反序列化会失败，需要重新 extract。
+    #[serde(default)]
+    pub enzyme: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Hash, PartialOrd, Eq, Ord, Default, Clone)]
@@ -937,6 +942,7 @@ fn process_paired_fastq_files(
             tag: *tag,
             tag_length: *tag_len,
             sample_source: sample_source.clone(),
+            enzyme: enzyme.name.clone(),
         };
         sylsp_entries.push(entry);
     }
@@ -1044,6 +1050,7 @@ pub fn extract(args: ExtractArgs) -> Result<()> {
                         tag: *tag,
                         tag_length: *tag_len,
                         sample_source: sample_source.clone(),
+                        enzyme: enzyme.name.clone(),
                     };
                     sylsp_entries.push(entry);
                 }
@@ -1131,6 +1138,7 @@ pub fn extract(args: ExtractArgs) -> Result<()> {
                         tag: hash_bytes(tag),
                         tag_length: *tag_len,
                         sample_source: file_stem.clone(),
+                        enzyme: enzyme.name.clone(),
                     });
                 }
 
@@ -1323,6 +1331,7 @@ pub fn extract(args: ExtractArgs) -> Result<()> {
                             tag: *tag,
                             tag_length: *tag_len,
                             sample_source: file_stem.clone(), // 用文件名去除扩展名作为样本名
+                            enzyme: enzyme.name.clone(),
                         });
                     }
                 }

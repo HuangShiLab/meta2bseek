@@ -218,6 +218,9 @@ pub struct ContainArgs {
     #[clap(long="no-error-correction", help_heading = "ALGORITHM", help = "Disable error-aware ANI inversion in --mismatch 1 mode (restores the old divergence-only inversion).")]
     pub no_error_correction: bool,
 
+    #[clap(long="allow-enzyme-mismatch", help_heading = "ALGORITHM", help = "Proceed even if the sample sketch was extracted with a different enzyme set than the database (default: hard error when the sample lacks a DB enzyme).")]
+    pub allow_enzyme_mismatch: bool,
+
     
     #[clap(short='I',long="read-seq-id", help_heading = "ALGORITHM", help = "Sequence identity (%) of reads. Only used in -u option and overrides automatic detection. ")]
     pub seq_id: Option<f64>,
@@ -304,6 +307,9 @@ pub struct ProfileArgs {
 
     #[arg(long, help_heading = "ALGORITHM", help = "Disable error-aware ANI inversion in --mismatch 1 mode (restores the old divergence-only inversion).")]
     pub no_error_correction: bool,
+
+    #[arg(long, help_heading = "ALGORITHM", help = "Proceed even if the sample sketch was extracted with a different enzyme set than the database (default: hard error when the sample lacks a DB enzyme).")]
+    pub allow_enzyme_mismatch: bool,
     
     #[arg(long)]
     pub out_file_name: Option<String>,

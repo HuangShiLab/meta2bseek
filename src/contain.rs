@@ -601,7 +601,8 @@ pub fn query(args: ContainArgs) -> Result<()> {
         let db_entries = aggregate_db_by_genome(db_entries);
 
         eprintln!("Found {} genomes in database (after aggregating contigs)", db_entries.len());
-        if let Some(enzyme) = detect_db_enzyme(&db_entries) {
+        let db_enzyme = detect_db_enzyme(&db_entries);
+        if let Some(enzyme) = &db_enzyme {
             eprintln!("Database enzyme: {}", enzyme);
         }
         ensure_tag_seqs_for_mismatch(&db_entries, args.mismatch)?;
@@ -623,6 +624,9 @@ pub fn query(args: ContainArgs) -> Result<()> {
                 eprintln!("Warning: Sample {} has no tags", sample_path);
                 return Ok(());
             }
+
+            // 酶集合一致性检查（DB vs 样本 sketch）
+            check_enzyme_compat(db_enzyme.as_deref(), detect_sample_enzyme(&sample_entries).as_deref(), args.allow_enzyme_mismatch, sample_path)?;
 
             // 统计样本中每个 tag 的覆盖度（重数），用于覆盖度校正
             let sample_counts = sample_tag_counts(&sample_entries);
@@ -912,6 +916,78 @@ fn detect_db_enzyme(entries: &[SyldbEntry]) -> Option<String> {
         }
     }
     counts.into_iter().max_by_key(|(_, c)| *c).map(|(e, _)| e)
+}
+
+/// 从样本条目（.sylsp）中推断提取时使用的酶（取非空众数）。旧格式无此字段 → None。
+fn detect_sample_enzyme(entries: &[SylspEntry]) -> Option<String> {
+    let mut counts: FxHashMap<String, usize> = FxHashMap::default();
+    for e in entries {
+        if !e.enzyme.is_empty() {
+            *counts.entry(e.enzyme.clone()).or_insert(0) += 1;
+        }
+    }
+    counts.into_iter().max_by_key(|(_, c)| *c).map(|(e, _)| e)
+}
+
+/// 把逗号分隔的酶字符串规范化为有序集合（去空白、去重、排序）。
+fn enzyme_set(s: &str) -> std::collections::BTreeSet<String> {
+    s.split(',')
+        .map(|x| x.trim())
+        .filter(|x| !x.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// DB 与样本的酶集合一致性检查。
+/// - 集合相同（或任一侧缺失酶信息，如旧格式文件）→ 直接通过。
+/// - 集合不同 → 打印醒目的 stderr 警告，列出两侧酶集合，并提示 DB 中缺失于样本的酶
+///   会导致 containment 被压低（这些 tag 在样本中根本不存在）。
+/// - 若 DB 含有样本完全缺失的酶：默认硬错误；`--allow-enzyme-mismatch` 可降级为警告继续。
+///   （样本多出 DB 没有的酶只是浪费样本 tag，不硬错。）
+fn check_enzyme_compat(
+    db_enzyme: Option<&str>,
+    sample_enzyme: Option<&str>,
+    allow_mismatch: bool,
+    context: &str,
+) -> Result<()> {
+    let (db_str, sp_str) = match (db_enzyme, sample_enzyme) {
+        (Some(d), Some(s)) if !d.is_empty() && !s.is_empty() => (d, s),
+        _ => return Ok(()), // 任一侧无酶信息（旧格式），无法检查
+    };
+    let db_set = enzyme_set(db_str);
+    let sp_set = enzyme_set(sp_str);
+    if db_set == sp_set {
+        return Ok(());
+    }
+    let missing: Vec<String> = db_set.difference(&sp_set).cloned().collect();
+    let extra: Vec<String> = sp_set.difference(&db_set).cloned().collect();
+    eprintln!("================ ENZYME MISMATCH ================");
+    eprintln!("{}: database enzymes = {{{}}}, sample enzymes = {{{}}}",
+              context,
+              db_set.iter().cloned().collect::<Vec<_>>().join(","),
+              sp_set.iter().cloned().collect::<Vec<_>>().join(","));
+    if !missing.is_empty() {
+        eprintln!("DB enzymes MISSING from sample sketch: {{{}}}. \
+                  Containment/ANI for tags of these enzymes will be deflated (they can never match). \
+                  Re-extract the sample with the same enzyme set as the database.",
+                  missing.join(","));
+    }
+    if !extra.is_empty() {
+        eprintln!("Sample enzymes not in database: {{{}}} (those sample tags are simply unused).",
+                  extra.join(","));
+    }
+    eprintln!("=================================================");
+    if !missing.is_empty() && !allow_mismatch {
+        return Err(anyhow!(
+            "enzyme mismatch in {}: database requires {{{}}} but the sample sketch was extracted without them. \
+             Re-extract the sample with matching enzymes, or pass --allow-enzyme-mismatch to proceed anyway",
+            context, missing.join(",")
+        ));
+    }
+    if !missing.is_empty() {
+        eprintln!("--allow-enzyme-mismatch set; continuing despite missing sample enzymes {{{}}}", missing.join(","));
+    }
+    Ok(())
 }
 
 /// mismatch 模式需要数据库中存储的 tag 序列来生成 1-mismatch 邻居；
@@ -1304,6 +1380,9 @@ pub fn query_single_file(sample_path: &str, db_path: &str, min_ani: f64, mismatc
         eprintln!("Warning: Sample {} has no tags", sample_path);
         return Ok(Vec::new());
     }
+
+    // 酶集合一致性检查（无 CLI 上下文：严格模式）
+    check_enzyme_compat(detect_db_enzyme(&db_entries).as_deref(), detect_sample_enzyme(&sample_entries).as_deref(), false, sample_path)?;
 
     // 按样本源分组
     let mut sample_groups: FxHashMap<String, Vec<&SylspEntry>> = FxHashMap::default();
@@ -1809,7 +1888,8 @@ pub fn profile(args: ProfileArgs) -> Result<()> {
     let cached_db_entries = aggregate_db_by_genome(cached_db_entries);
 
     eprintln!("Cached {} genomes from database (after aggregating contigs)", cached_db_entries.len());
-    if let Some(enzyme) = detect_db_enzyme(&cached_db_entries) {
+    let db_enzyme = detect_db_enzyme(&cached_db_entries);
+    if let Some(enzyme) = &db_enzyme {
         eprintln!("Database enzyme: {}", enzyme);
     }
     ensure_tag_seqs_for_mismatch(&cached_db_entries, args.mismatch)?;
@@ -1832,6 +1912,12 @@ pub fn profile(args: ProfileArgs) -> Result<()> {
         cached_sample_entries.insert(sample_path.clone(), sample_entries);
     }
     eprintln!("Cached {} sample files", cached_sample_entries.len());
+
+    // 酶集合一致性检查：在并行流程开始前，对每个样本 sketch 与 DB 比较
+    // （query_single_file_with_cached_db 的 Result 会被 `if let Ok` 吞掉，硬错误必须放在这里）。
+    for (sample_path, entries) in &cached_sample_entries {
+        check_enzyme_compat(db_enzyme.as_deref(), detect_sample_enzyme(entries).as_deref(), args.allow_enzyme_mismatch, sample_path)?;
+    }
 
     // 从缓存的数据库构建基因组映射关系
     let genome_mapping = build_genome_mapping_from_cache(&cached_db_entries);
@@ -2324,5 +2410,24 @@ mod tests {
         let db = vec![entry];
         let e = estimate_read_error_rate(&db, &sample_counts);
         assert!((e - 0.005).abs() < 0.002, "estimated e={}", e);
+    }
+
+    #[test]
+    fn test_enzyme_compat_guard() {
+        // 匹配（含顺序/空白差异）→ 通过。
+        assert!(check_enzyme_compat(Some("BcgI"), Some("BcgI"), false, "t").is_ok());
+        assert!(check_enzyme_compat(Some("BcgI,BslFI"), Some(" BslFI , BcgI "), false, "t").is_ok());
+
+        // DB 有样本缺失的酶 → 硬错误；--allow-enzyme-mismatch → 通过。
+        assert!(check_enzyme_compat(Some("BcgI,BslFI,CspCI,AloI"), Some("BcgI"), false, "t").is_err());
+        assert!(check_enzyme_compat(Some("BcgI,BslFI,CspCI,AloI"), Some("BcgI"), true, "t").is_ok());
+
+        // 样本多出 DB 没有的酶 → 仅警告，不硬错。
+        assert!(check_enzyme_compat(Some("BcgI"), Some("BcgI,AloI"), false, "t").is_ok());
+
+        // 任一侧缺酶信息（旧格式文件）→ 跳过检查。
+        assert!(check_enzyme_compat(None, Some("BcgI"), false, "t").is_ok());
+        assert!(check_enzyme_compat(Some("BcgI"), None, false, "t").is_ok());
+        assert!(check_enzyme_compat(Some(""), Some("BcgI"), false, "t").is_ok());
     }
 }
