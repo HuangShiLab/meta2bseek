@@ -334,6 +334,13 @@ pub struct ProfileArgs {
 
     #[arg(long, default_value_t = crate::contain::MIN_TAGS_FOR_GENOME, help_heading = "ALGORITHM", help = "Exclude genomes with fewer than N matched tags (default 50; lower values increase sensitivity on large dense databases)")]
     pub min_tags_genome: usize,
+
+    #[arg(
+        long,
+        help_heading = "ALGORITHM",
+        help = "Disable winner-take-all over-stripping protection (default: protection ON). When ON, a genome that loses >50% of its initially shared tags to reassignment and would fall below the reporting floor is kept with its pre-reassignment ANI/tag counts; its abundance still uses post-reassignment coverage so reads are not double-counted."
+    )]
+    pub no_reassign_protection: bool,
 }
 
 #[derive(Debug)]

@@ -61,7 +61,7 @@ Run tests:
 cargo test
 ```
 
-Current test coverage is minimal: there is one unit test in `src/mark.rs` for `mark_unique_tags`.
+Current test coverage is modest: unit tests live in `#[cfg(test)] mod tests` blocks inside `src/contain.rs`, `src/extract.rs`, `src/merge.rs`, and `src/mark.rs` (ANI inversion, error-rate estimation, tag coverage lookup, merge guards, and winner-take-all over-stripping protection).
 
 ## Runtime Architecture
 
@@ -141,7 +141,7 @@ Run the full test suite:
 cargo test
 ```
 
-The current suite is small. There is exactly one passing unit test (`mark::tests::test_mark_unique_tags`). There are no integration tests, no CI configuration, and no sample test data in the repository.
+The current suite is small (15 lib + 18 bin tests as of the over-stripping protection fix). There are no integration tests, no CI configuration, and no sample test data in the repository.
 
 When adding new functionality, add unit tests under `#[cfg(test)] mod tests` in the relevant module and, where practical, add a small integration test using sample FASTA/FASTQ fixtures.
 
