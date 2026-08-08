@@ -409,9 +409,14 @@ fn recalculate_with_winner_table(
             } else if reassign_protection {
                 // 过度剥离保护：winner-take-all 在密集多酶库上会把近缘菌株的整个 tag 集判给
                 // 赢家，导致输家 post-reassignment ANI/shared_tags 崩塌并被 min-ani 过滤掉
-                // （此时 filter_over_reassigned_genomes 根本来不及触发）。若该基因组丢掉的
-                // 命中 tag 超过初始共享 tag 的 REASSIGN_PROTECT_LOSS_FRAC，说明崩塌主要由
-                // 重新分配造成而非真实缺失 —— 用**重分配前**的 ANI/containment/tag 数保留它。
+                // （此时 filter_over_reassigned_genomes 根本来不及触发）。触发条件（v2，
+                // 两个条件同时满足）：
+                //   (a) 近全灭：重分配后存活的命中 tag ≤ REASSIGN_PROTECT_SURVIVAL_FRAC ×
+                //       初始共享 tag 数（真阳性湮灭的特征是 2312/2312 全丢；普通菌株簇
+                //       输家只丢一部分，不应被保护 —— v1 的 >50% 丢失阈值在此非特异）；
+                //   (b) 强初始证据：初始共享 tag 数 ≥ max(REASSIGN_PROTECT_MIN_INITIAL_TAGS,
+                //       min_shared_tags)。
+                // 满足则以**重分配前**的 ANI/containment/tag 数保留该基因组。
                 //
                 // 设计取舍：
                 // - ANI/tag 数取初始值（检测证据不该被重分配摧毁），但 eff_cov 取
@@ -420,11 +425,12 @@ fn recalculate_with_winner_table(
                 // - 防膨胀护栏：保留的基因组必须用其初始统计重新通过 profile 过滤
                 //   （min-ani 作用于初始 ANI，min_shared_tags 作用于初始共享数）；
                 //   初始 pass 本来已过滤过，这里显式复查以确保不变量。
-                // - 丢 tag 比例不超过阈值（例如单纯 ANI 偏低）的基因组不享受保护，
-                //   避免把真实低质量匹配也保留下来。
                 if let Some(init) = initial_by_contig.get(db_entry.sequence_id.as_str()) {
-                    let loss_frac = tags_lost_count as f64 / init.shared_tags.max(1) as f64;
-                    if loss_frac > REASSIGN_PROTECT_LOSS_FRAC
+                    let initial_shared = init.shared_tags;
+                    let survival_frac = result.shared_tags as f64 / initial_shared.max(1) as f64;
+                    let min_initial = min_shared_tags.max(REASSIGN_PROTECT_MIN_INITIAL_TAGS);
+                    if survival_frac <= REASSIGN_PROTECT_SURVIVAL_FRAC
+                        && initial_shared >= min_initial
                         && filter_results_for_profile(
                             init,
                             Some(min_ani),
@@ -440,9 +446,9 @@ fn recalculate_with_winner_table(
                         protected.eff_cov = result.eff_cov;
                         protected.eff_lambda = result.eff_lambda;
                         eprintln!(
-                            "Reassignment protection: genome {} in sample {} lost {}/{} initial shared tags ({:.1}%) and was stripped below the reporting floor; keeping pre-reassignment ANI {:.2} with post-reassignment eff_cov {:.4} (reassignment-contested)",
-                            genome_id, sample_source, tags_lost_count, init.shared_tags,
-                            loss_frac * 100.0, protected.adjusted_ani, protected.eff_cov
+                            "Reassignment protection: genome {} in sample {} kept only {}/{} initial shared tags ({:.1}% survival) and was stripped below the reporting floor; keeping pre-reassignment ANI {:.2} with post-reassignment eff_cov {:.4} (reassignment-contested)",
+                            genome_id, sample_source, result.shared_tags, initial_shared,
+                            survival_frac * 100.0, protected.adjusted_ani, protected.eff_cov
                         );
                         all_results.push(protected);
                     }
@@ -588,14 +594,16 @@ const MIN_ANI: f64 = 90.0;                // sylph query 默认 (was 95)
 const PROFILE_MIN_ANI: f64 = 95.0;        // sylph profile 默认 (was 97)
 pub const MIN_TAGS_FOR_GENOME: usize = 50;    // 基因组最小标签数 (sylph min_number_kmers)
 pub const MIN_SHARED_TAGS_FOR_PROFILE: usize = 100; // 覆盖度校正后报告一个基因组所需的最小共享 tag 数；防止极低 tag 数下的虚假优势调用
-/// Winner-take-all 过度剥离保护阈值：若某基因组在重新分配中丢掉的（样本中命中的）tag
-/// 占其初始共享 tag 的比例超过此值，且重新分配后的结果因此被过滤掉，则以**初始（重分配前）**
-/// 的 containment/ANI/tag 数保留该基因组（丰度仍用重分配后的 eff_cov，避免双重计数）。
-/// 取 0.5 的考量：小于 0.5 时保护基本不触发（多数 tag 仍归自己，ANI 不会因剥离而崩塌），
-/// 大于 0.5 说明 winner-take-all 已夺走该基因组的大部分证据 —— 在密集多酶库上这几乎总是
-/// 近缘菌株互相抢 tag 的伪影而非真实的缺失。该阈值是经验常数，CAMI2 验证将量化其对
-/// precision 的影响；如未来需要可调，可提升为 CLI 参数。
-const REASSIGN_PROTECT_LOSS_FRAC: f64 = 0.5;
+/// Winner-take-all 过度剥离保护阈值（v2，按 CAMI2 143k 基因组库实测调紧）：
+/// 仅当某基因组重分配后**存活**的命中 tag 比例 ≤ 此值（近乎全灭）才考虑保护。
+/// v1 用"丢失 >50%"做触发，在密集库上非特异 —— 普通菌株簇的输家也会丢一半 tag，
+/// 导致 ~44k 基因组/样本被保护、precision 崩塌（0.69→0.25）。真阳性湮灭的特征是
+/// **近全灭**（实测 2312/2312、7326/7327、1555→0、462→1），故改为存活率 ≤5%。
+const REASSIGN_PROTECT_SURVIVAL_FRAC: f64 = 0.05;
+/// 保护还要求初始共享 tag 数 ≥ 此值（强初始证据）。有效下限为
+/// max(REASSIGN_PROTECT_MIN_INITIAL_TAGS, min_shared_tags)。初始证据弱的基因组
+/// 即使被全灭也不保护 —— 它们更可能是低质量匹配而非被误杀的真阳性。
+const REASSIGN_PROTECT_MIN_INITIAL_TAGS: usize = 100;
 // 2bRAD tag 长度，用作 containment->ANI 的指数。BcgI=32；理想情况下应随酶/数据库存储。
 const K: f64 = 32.0;
 
@@ -2502,61 +2510,73 @@ mod tests {
         assert!(check_enzyme_compat(Some(""), Some("BcgI"), false, "t").is_ok());
     }
 
-    /// 构造过度剥离场景：基因组 B 与赢家 A 共享 10/11 个 tag，只有 1 个独有 tag。
-    /// winner-take-all 把共享 tag 全判给 A → B 重分配后 shared=1，低于 min_shared_tags
-    /// 地板被过滤。保护开启时应以初始 ANI/tag 数保留 B，eff_cov 用重分配后的值。
+    /// 构造过度剥离场景（v2 阈值）：
+    /// - A = 赢家，与 B 共享 tag 1..=100、与 C/D 共享 1..=60，ANI 最高 → 赢得全部共享 tag。
+    /// - B = 近全灭输家：100 个共享 tag 全丢，仅剩 4 个独有 tag（存活 4% ≤ 5%）→ 应被保护。
+    /// - C = 普通菌株簇输家：丢 60/100（存活 40% > 5%）→ 不应被保护（v1 的 >50% 丢失
+    ///   阈值会误保护它）。
+    /// - D = 弱初始证据：60 个共享 tag 全丢（存活 0%），但初始共享 60 < 100 → 不应被保护。
     fn over_stripped_fixture() -> (Vec<SyldbEntry>, Vec<SylspEntry>, Vec<QueryResult>) {
-        let shared_tags: Vec<Hash> = (1001u64..=1010).collect();
-        let b_unique: Hash = 2001;
-        let a_unique: Hash = 3001;
+        let shared_ab: Vec<Hash> = (1u64..=100).collect();
+        let b_unique: Vec<Hash> = (2001u64..=2004).collect();
+        let c_unique: Vec<Hash> = (3001u64..=3040).collect();
+        let a_unique: Hash = 9001; // 不在样本中
+        let d_unique: Hash = 9501; // 不在样本中
 
-        let mk_db = |id: &str, extra: Hash| SyldbEntry {
-            sequence_id: id.to_string(),
-            tags: shared_tags
-                .iter()
-                .cloned()
-                .chain(std::iter::once(extra))
-                .collect(),
-            tag_lengths: vec![32u8; 11],
-            genome_source: format!("{}.fasta", id),
-            tag_uniqueness: None,
-            tag_seqs: None,
-            enzyme: "BcgI".to_string(),
-        };
-        let db = vec![mk_db("A", a_unique), mk_db("B", b_unique)];
-
-        // 样本：共享 tag 覆盖度 4，B 独有 tag 覆盖度 5；A 独有 tag 不覆盖。
-        let mut sample = Vec::new();
-        for &t in &shared_tags {
-            for _ in 0..4 {
-                sample.push(SylspEntry {
-                    sequence_id: format!("r{}", t),
-                    tag: t,
-                    tag_length: 32,
-                    sample_source: "s1".to_string(),
-                    enzyme: "BcgI".to_string(),
-                });
-            }
-        }
-        for i in 0..5 {
-            sample.push(SylspEntry {
-                sequence_id: format!("rb{}", i),
-                tag: b_unique,
-                tag_length: 32,
-                sample_source: "s1".to_string(),
+        let mk_db = |id: &str, shared: &[Hash], unique: &[Hash]| {
+            let mut tags: Vec<Hash> = shared.to_vec();
+            tags.extend_from_slice(unique);
+            SyldbEntry {
+                sequence_id: id.to_string(),
+                tag_lengths: vec![32u8; tags.len()],
+                tags,
+                genome_source: format!("{}.fasta", id),
+                tag_uniqueness: None,
+                tag_seqs: None,
                 enzyme: "BcgI".to_string(),
-            });
-        }
+            }
+        };
+        let db = vec![
+            mk_db("A", &shared_ab, &[a_unique]),
+            mk_db("B", &shared_ab, &b_unique),
+            mk_db("C", &shared_ab[..60], &c_unique),
+            mk_db("D", &shared_ab[..60], &[d_unique]),
+        ];
 
-        // 初始（重分配前）结果：A、B 均通过 profile 过滤，A 的 ANI 更高 → 赢得所有共享 tag。
-        let mut init_a = dummy_result(10, 11, 99.9);
-        init_a.contig_name = "A".to_string();
-        init_a.sample_file = "s1".to_string();
-        let mut init_b = dummy_result(10, 11, 99.0);
-        init_b.contig_name = "B".to_string();
-        init_b.sample_file = "s1".to_string();
+        // 样本：共享 tag 覆盖度 4，B 独有 tag 覆盖度 5，C 独有 tag 覆盖度 3。
+        let mut sample = Vec::new();
+        let mut push_tags = |tags: &[Hash], copies: usize, prefix: &str| {
+            for &t in tags {
+                for i in 0..copies {
+                    sample.push(SylspEntry {
+                        sequence_id: format!("{}{}_{}", prefix, t, i),
+                        tag: t,
+                        tag_length: 32,
+                        sample_source: "s1".to_string(),
+                        enzyme: "BcgI".to_string(),
+                    });
+                }
+            }
+        };
+        push_tags(&shared_ab, 4, "rs");
+        push_tags(&b_unique, 5, "rb");
+        push_tags(&c_unique, 3, "rc");
 
-        (db, sample, vec![init_a, init_b])
+        // 初始（重分配前）结果：均通过 profile 过滤，A 的 ANI 最高 → 赢得所有共享 tag。
+        let mk_init = |id: &str, shared: usize, ref_tags: usize, ani: f64| {
+            let mut r = dummy_result(shared, ref_tags, ani);
+            r.contig_name = id.to_string();
+            r.sample_file = "s1".to_string();
+            r
+        };
+        let initial = vec![
+            mk_init("A", 100, 101, 99.9),
+            mk_init("B", 100, 104, 99.0),
+            mk_init("C", 100, 100, 98.5),
+            mk_init("D", 60, 61, 98.0),
+        ];
+
+        (db, sample, initial)
     }
 
     #[test]
@@ -2565,10 +2585,10 @@ mod tests {
         let (winner_map, interner) = build_winner_table(&initial, &db, false);
 
         let min_ani = 95.0;
-        let min_shared = 10;
+        let min_shared = 50;
         let min_tags_genome = 1;
 
-        // 保护开启：B 被保留 —— 初始 ANI/shared_tags，重分配后的 eff_cov。
+        // 保护开启：B（存活 4%）被保留 —— 初始 ANI/shared_tags，重分配后的 eff_cov。
         let protected = recalculate_with_winner_table(
             &db,
             &sample,
@@ -2587,13 +2607,13 @@ mod tests {
         let b = protected
             .iter()
             .find(|r| r.genome_file == "B")
-            .expect("over-stripped genome B should be protected");
+            .expect("near-annihilated genome B (4% survival) should be protected");
         assert_eq!(
             b.adjusted_ani, 99.0,
             "protected genome keeps pre-reassignment ANI"
         );
         assert_eq!(
-            b.shared_tags, 10,
+            b.shared_tags, 100,
             "protected genome keeps pre-reassignment shared tags"
         );
         assert_eq!(
@@ -2604,8 +2624,16 @@ mod tests {
             protected.iter().any(|r| r.genome_file == "A"),
             "winner A still reported"
         );
+        assert!(
+            !protected.iter().any(|r| r.genome_file == "C"),
+            "ordinary cluster loser C (60% loss, 40% survival) must NOT be protected"
+        );
+        assert!(
+            !protected.iter().any(|r| r.genome_file == "D"),
+            "genome D with weak initial evidence (60 < 100 initial shared) must NOT be protected"
+        );
 
-        // 保护关闭（--no-reassign-protection）：B 被剥离后过滤掉，与旧行为一致。
+        // 保护关闭（--no-reassign-protection）：B/C/D 均被剥离后过滤掉，与旧行为一致。
         let unprotected = recalculate_with_winner_table(
             &db,
             &sample,
@@ -2625,9 +2653,11 @@ mod tests {
             !unprotected.iter().any(|r| r.genome_file == "B"),
             "without protection B is stripped below the floor and dropped"
         );
+        assert!(!unprotected.iter().any(|r| r.genome_file == "C"));
+        assert!(!unprotected.iter().any(|r| r.genome_file == "D"));
         assert!(unprotected.iter().any(|r| r.genome_file == "A"));
 
-        // 防膨胀护栏：初始 ANI 低于 min_ani 的基因组即使被过度剥离也不受保护。
+        // 防膨胀护栏：初始 ANI 低于 min_ani 的基因组即使被近全灭也不受保护。
         let mut low_ani_initial = initial.clone();
         // B 初始 ANI 不达标；重建 winner table（B 的 ANI 变了，但 A 仍赢所有共享 tag）。
         low_ani_initial[1].adjusted_ani = 90.0;
@@ -2647,7 +2677,9 @@ mod tests {
             &low_ani_initial,
             true,
         );
-        assert!(!guarded.iter().any(|r| r.genome_file == "B"),
-            "genome failing min-ani on pre-reassignment stats must not be protected");
+        assert!(
+            !guarded.iter().any(|r| r.genome_file == "B"),
+            "genome failing min-ani on pre-reassignment stats must not be protected"
+        );
     }
 }
