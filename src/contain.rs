@@ -2041,7 +2041,7 @@ pub fn profile(args: ProfileArgs) -> Result<()> {
                         args.read_error_rate,
                         args.no_error_correction,
                         &initial_results,
-                        !args.no_reassign_protection,
+                        args.reassign_protection,
                     );
                     
                     // 第三阶段：过滤过度重新分配的基因组

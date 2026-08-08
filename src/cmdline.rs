@@ -338,9 +338,9 @@ pub struct ProfileArgs {
     #[arg(
         long,
         help_heading = "ALGORITHM",
-        help = "Disable winner-take-all over-stripping protection (default: protection ON). When ON, a genome with >=100 initially shared tags that keeps <=5% of them after reassignment (near-total annihilation) and would fall below the reporting floor is kept with its pre-reassignment ANI/tag counts; its abundance still uses post-reassignment coverage so reads are not double-counted."
+        help = "Enable winner-take-all over-stripping protection (default: OFF). When ON, a genome with >=100 initially shared tags that keeps <=5% of them after reassignment (near-total annihilation) and would fall below the reporting floor is kept with its pre-reassignment ANI/tag counts; its abundance still uses post-reassignment coverage so reads are not double-counted. NOTE: on large dense databases this rescues many strain-cluster losers alongside true positives (precision cost measured on CAMI2); OFF is the safer default."
     )]
-    pub no_reassign_protection: bool,
+    pub reassign_protection: bool,
 }
 
 #[derive(Debug)]
